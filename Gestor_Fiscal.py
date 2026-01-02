@@ -315,8 +315,8 @@ def pagina_dctf_web():
         df_dctf["GUIA DCTF WEB"] = "Não"
     else:
         df_dctf["GUIA DCTF WEB"] = df_dctf["GUIA DCTF WEB"].astype(str).str.upper().replace({"OK":"Guia salva","NAN":"Não","": "Não"})
-    colunas = ["Código","Razão Social","CNPJ","Regime","Município","Estado",
-               "FATURAMENTO SERVIÇOS","BASE DE CÁLCULO ISS","DCTF WEB","GUIA DCTF WEB","Situação"]
+    colunas = ["Código","Razão Social","CNPJ","Regime","PERÍODO","CATEGORIA",
+               "ORIGEM","TIPO","SITUAÇÃO DCTF"]
     df_dctf = df_dctf[[c for c in colunas if c in df_dctf.columns]]
     concluidas = df_dctf[df_dctf["DCTF WEB"].astype(str).str.upper()=="DCTF WEB SALVA"].shape[0]
     sem_acesso = df_dctf[df_dctf["DCTF WEB"].astype(str).str.upper()=="SEM ACESSO"].shape[0]
