@@ -300,45 +300,74 @@ def pagina_dctf_web():
     if df is None or df.empty:
         st.warning("Nenhum dado encontrado.")
         return
+
+    # Competência (mantém padrão)
     competencia_raw = df.get("PERÍODO DE COMPETÊNCIA", [""])[0]
-    competencia = pd.to_datetime(competencia_raw, errors='coerce').strftime("%m/%Y") if competencia_raw else ""
-    df_dctf = df[df["Situação"].astype(str).str.upper() == "ATIVA"] if "Situação" in df.columns else pd.DataFrame()
+    competencia = (
+        pd.to_datetime(competencia_raw, errors="coerce").strftime("%m/%Y")
+        if competencia_raw else ""
+    )
+
+    # Filtro: somente empresas ATIVAS
+    if "Situação" in df.columns:
+        df_dctf = df[df["Situação"].astype(str).str.upper() == "ATIVA"].copy()
+    else:
+        df_dctf = pd.DataFrame()
+
     if df_dctf.empty:
         st.warning("Nenhuma empresa ATIVA encontrada para DCTF WEB.")
         return
-    for col in ["FATURAMENTO SERVIÇOS","BASE DE CÁLCULO ISS"]:
-        if col in df_dctf.columns:
-            df_dctf[col] = df_dctf[col].fillna(0).astype(float).map(lambda x: f"R$ {x:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-    if "DCTF WEB" not in df_dctf.columns:
-        df_dctf["DCTF WEB"] = ""
-    if "GUIA DCTF WEB" not in df_dctf.columns:
-        df_dctf["GUIA DCTF WEB"] = "Não"
-    else:
-        df_dctf["GUIA DCTF WEB"] = df_dctf["GUIA DCTF WEB"].astype(str).str.upper().replace({"OK":"Guia salva","NAN":"Não","": "Não"})
-    colunas = ["Código","Razão Social","CNPJ","Regime","PERÍODO","CATEGORIA",
-               "ORIGEM","TIPO","SITUAÇÃO DCTF"]
-    df_dctf = df_dctf[[c for c in colunas if c in df_dctf.columns]]
-    concluidas = df_dctf[df_dctf["DCTF WEB"].astype(str).str.upper()=="DCTF WEB SALVA"].shape[0]
-    sem_acesso = df_dctf[df_dctf["DCTF WEB"].astype(str).str.upper()=="SEM ACESSO"].shape[0]
-    nao_concluidas = df_dctf[~df_dctf["DCTF WEB"].astype(str).str.upper().isin(["DCTF WEB SALVA","SEM ACESSO"])].shape[0]
+
+    # Garante coluna SITUAÇÃO DCTF
+    if "SITUAÇÃO DCTF" not in df_dctf.columns:
+        df_dctf["SITUAÇÃO DCTF"] = ""
+
+    # Colunas finais (ordem fixa)
+    colunas_finais = [
+        "Código",
+        "Razão Social",
+        "CNPJ",
+        "Regime",
+        "PERÍODO",
+        "CATEGORIA",
+        "ORIGEM",
+        "TIPO",
+        "SITUAÇÃO DCTF",
+        "Situação",
+    ]
+    df_dctf = df_dctf[[c for c in colunas_finais if c in df_dctf.columns]]
+
+    # Totais baseados na coluna SITUAÇÃO DCTF
+    situacao_dctf = df_dctf["SITUAÇÃO DCTF"].astype(str).str.upper()
+
+    concluidas = (situacao_dctf == "ATIVA").sum()
+    sem_procuracao = (situacao_dctf == "SEM PROCURAÇÃO").sum()
+    nao_concluidas = len(df_dctf) - concluidas - sem_procuracao
+
     st.markdown(
         f"<h2>DCTF WEB</h2>"
         f"<p style='text-align:right; font-size:20px;'>"
         f"<b>Concluídas:</b> {concluidas} | "
-        f"<b>Sem acesso:</b> {sem_acesso} | "
+        f"<b>Sem Procuração:</b> {sem_procuracao} | "
         f"<b>Não concluídas:</b> {nao_concluidas} | "
         f"<b>Competência:</b> {competencia}</p>",
         unsafe_allow_html=True
     )
 
-    # Pausa de 3 segundos antes de mostrar o grid
     time.sleep(1)
 
-    exibe_aggrid(df_dctf, height=400, grid_key="grid_dctf_web")
+    # Grid (key nova para evitar cache de layout antigo)
+    exibe_aggrid(df_dctf, height=400, grid_key="grid_dctf_web_v4")
+
     output = BytesIO()
     df_dctf.to_excel(output, index=False)
-    st.download_button("Baixar Excel", data=output.getvalue(), file_name="dctf_web.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.download_button(
+        "Baixar Excel",
+        data=output.getvalue(),
+        file_name="dctf_web.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
 
 def pagina_dms():
     df = le_planilha_google(GOOGLE_SHEET_URL, SHEET_EMPRESAS)
