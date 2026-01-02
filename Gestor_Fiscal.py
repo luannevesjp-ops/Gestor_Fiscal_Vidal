@@ -296,76 +296,119 @@ def pagina_reinf():
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 def pagina_dctf_web():
+    import streamlit as st
+    import pandas as pd
+    from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
+
     df = le_planilha_google(GOOGLE_SHEET_URL, SHEET_EMPRESAS)
+
     if df is None or df.empty:
         st.warning("Nenhum dado encontrado.")
         return
 
-    # Competência (mantém padrão)
-    competencia_raw = df.get("PERÍODO DE COMPETÊNCIA", [""])[0]
-    competencia = (
-        pd.to_datetime(competencia_raw, errors="coerce").strftime("%m/%Y")
-        if competencia_raw else ""
-    )
+    # Remove None
+    df = df.fillna("")
 
-    # Filtro: somente empresas ATIVAS
-    if "Situação" in df.columns:
-        df_dctf = df[df["Situação"].astype(str).str.upper() == "ATIVA"].copy()
-    else:
-        df_dctf = pd.DataFrame()
+    # Filtra somente ATIVAS
+    df = df[df["Situação"].astype(str).str.upper() == "ATIVA"]
 
-    if df_dctf.empty:
-        st.warning("Nenhuma empresa ATIVA encontrada para DCTF WEB.")
+    if df.empty:
+        st.warning("Nenhuma empresa ATIVA encontrada.")
         return
 
-    # Garante coluna SITUAÇÃO DCTF
-    if "SITUAÇÃO DCTF" not in df_dctf.columns:
-        df_dctf["SITUAÇÃO DCTF"] = ""
+    # =========================
+    # COMPETÊNCIA (MM/YYYY)
+    # =========================
+    competencia = ""
+    if "PERÍODO DE COMPETÊNCIA" in df.columns:
+        try:
+            competencia_dt = pd.to_datetime(
+                df["PERÍODO DE COMPETÊNCIA"].iloc[0],
+                errors="coerce"
+            )
+            if not pd.isna(competencia_dt):
+                competencia = competencia_dt.strftime("%m/%Y")
+        except Exception:
+            competencia = ""
 
-    # Colunas finais (ordem fixa)
-    colunas_finais = [
+    # =========================
+    # PERÍODO (MM-YYYY)
+    # =========================
+    if "PERÍODO" in df.columns:
+        df["PERÍODO"] = (
+            pd.to_datetime(df["PERÍODO"], errors="coerce")
+            .dt.strftime("%m-%Y")
+            .fillna("")
+        )
+
+    # =========================
+    # DATAFRAME FINAL
+    # =========================
+    df_dctf = df[[
         "Código",
         "Razão Social",
         "CNPJ",
         "Regime",
         "PERÍODO",
-        "CATEGORIA",
         "ORIGEM",
         "TIPO",
         "SITUAÇÃO DCTF",
-        "Situação",
-    ]
-    df_dctf = df_dctf[[c for c in colunas_finais if c in df_dctf.columns]]
+        "MATRIZ / FILIAL",
+        "Situação"
+    ]].copy()
 
-    # Totais baseados na coluna SITUAÇÃO DCTF
-    situacao_dctf = df_dctf["SITUAÇÃO DCTF"].astype(str).str.upper()
+    # =========================
+    # TOTALIZADORES
+    # =========================
+    concluidas = df_dctf[
+        df_dctf["SITUAÇÃO DCTF"].astype(str).str.upper() == "ATIVA"
+    ].shape[0]
 
-    concluidas = (situacao_dctf == "ATIVA").sum()
-    sem_procuracao = (situacao_dctf == "SEM PROCURAÇÃO").sum()
-    nao_concluidas = len(df_dctf) - concluidas - sem_procuracao
+    sem_procuracao = df_dctf[
+        df_dctf["SITUAÇÃO DCTF"].astype(str).str.upper() == "SEM PROCURAÇÃO"
+    ].shape[0]
 
+    nao_concluidas_total = df_dctf[
+        ~df_dctf["SITUAÇÃO DCTF"].astype(str).str.upper().isin(
+            ["ATIVA", "SEM PROCURAÇÃO"]
+        )
+    ].shape[0]
+
+    filiais = df_dctf[
+        df_dctf["MATRIZ / FILIAL"].astype(str).str.upper() == "FILIAL"
+    ].shape[0]
+
+    nao_concluidas = nao_concluidas_total - filiais
+    if nao_concluidas < 0:
+        nao_concluidas = 0
+
+    # =========================
+    # CABEÇALHO (estrutura preservada)
+    # =========================
     st.markdown(
         f"<h2>DCTF WEB</h2>"
         f"<p style='text-align:right; font-size:20px;'>"
         f"<b>Concluídas:</b> {concluidas} | "
         f"<b>Sem Procuração:</b> {sem_procuracao} | "
+        f"<b>Filiais:</b> {filiais} | "
         f"<b>Não concluídas:</b> {nao_concluidas} | "
         f"<b>Competência:</b> {competencia}</p>",
         unsafe_allow_html=True
     )
 
-    time.sleep(1)
+    # =========================
+    # GRID
+    # =========================
+    gb = GridOptionsBuilder.from_dataframe(df_dctf)
+    gb.configure_default_column(resizable=True, filter=True, sortable=True)
+    gb.configure_grid_options(domLayout="normal")
 
-    # Grid (key nova para evitar cache de layout antigo)
-    exibe_aggrid(df_dctf, height=400, grid_key="grid_dctf_web_v4")
-
-    output = BytesIO()
-    df_dctf.to_excel(output, index=False)
-    st.download_button(
-        "Baixar Excel",
-        data=output.getvalue(),
-        file_name="dctf_web.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    AgGrid(
+        df_dctf,
+        gridOptions=gb.build(),
+        update_mode=GridUpdateMode.NO_UPDATE,
+        fit_columns_on_grid_load=True,
+        height=600
     )
 
 
