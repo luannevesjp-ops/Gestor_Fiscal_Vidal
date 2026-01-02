@@ -91,40 +91,31 @@ st.sidebar.markdown(menu_html, unsafe_allow_html=True)
 
 pagina = st.sidebar.radio(
     "", 
-    ["EMPRESAS", "SIMPLES NACIONAL", "REINF", "DCTF WEB", "DMS", "SERVIÇOS TOMADOS"], 
+    ["EMPRESAS", "SIMPLES NACIONAL", "REINF", "DCTF WEB", "DMS", "SERVIÇOS TOMADOS", "SEFAZ"], 
     index=0, 
     label_visibility="collapsed"
 )
 
+# ---------------- Controle de mudança de página ----------------
+if "pagina_atual" not in st.session_state:
+    st.session_state["pagina_atual"] = pagina
+
+# Se mudou de página, limpa e recarrega
+if st.session_state["pagina_atual"] != pagina:
+    st.session_state["pagina_atual"] = pagina
+    st.rerun()
+
+# ---------------- Função para exibir AgGrid ----------------
 # ---------------- Função para exibir AgGrid ----------------
 def exibe_aggrid(df, height=400, grid_key="grid"):
-    import pandas as pd
-    import streamlit as st
-    from st_aggrid import AgGrid, GridOptionsBuilder
-    from st_aggrid.shared import GridUpdateMode
-
-    # ---------- Configuração padrão ----------
-    gb = GridOptionsBuilder.from_dataframe(df)
-    gb.configure_default_column(
-        filter=True,
-        sortable=True,
-        editable=False,
-        resizable=True
-    )
-
-    # ---------- Configura filtros corretos por tipo ----------
-    for col in df.columns:
-        if pd.api.types.is_numeric_dtype(df[col]):
-            gb.configure_column(col, filter="agNumberColumnFilter")
-        else:
-            gb.configure_column(col, filter="agTextColumnFilter")
-
-    # ---------- Configurações gerais ----------
-def exibe_aggrid(df, height=400, grid_key="grid"):
     from st_aggrid import AgGrid, GridOptionsBuilder
     from st_aggrid.shared import GridUpdateMode
     import pandas as pd
+    import time
 
+    # Cria key única com timestamp para evitar conflitos
+    unique_key = f"{grid_key}_{int(time.time() * 1000000)}"
+    
     gb = GridOptionsBuilder.from_dataframe(df)
 
     # ---------- Configuração padrão para todas as colunas ----------
@@ -154,12 +145,12 @@ def exibe_aggrid(df, height=400, grid_key="grid"):
 
     grid_options = gb.build()
 
-    # ---------- Renderiza o grid ----------
+    # ---------- Renderiza o grid com key única ----------
     AgGrid(
         df,
         gridOptions=grid_options,
-        height=height,                  # altura fixa -> scroll interno
-        key=grid_key,                   # key único para cada grid
+        height=height,
+        key=unique_key,  # Key única com timestamp
         fit_columns_on_grid_load=True,
         enable_enterprise_modules=False,
         update_mode=GridUpdateMode.NO_UPDATE
@@ -168,6 +159,7 @@ def exibe_aggrid(df, height=400, grid_key="grid"):
 
 # ---------------- Funções de cada página ----------------
 def pagina_empresas():
+    st.empty()  # Limpa renderizações anteriores
     df = le_planilha_google(GOOGLE_SHEET_URL, SHEET_EMPRESAS)
     if df is None:
         return
@@ -215,8 +207,8 @@ def pagina_empresas():
     )
 
 
-
 def pagina_simples():
+    st.empty()  # Limpa renderizações anteriores
     df = le_planilha_google(GOOGLE_SHEET_URL, SHEET_EMPRESAS)
     if df is None:
         return
@@ -256,7 +248,9 @@ def pagina_simples():
     st.download_button("Baixar Excel", data=output.getvalue(), file_name="simples_nacional.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
+
 def pagina_reinf():
+    st.empty()  # Limpa renderizações anteriores
     df = le_planilha_google(GOOGLE_SHEET_URL, SHEET_EMPRESAS)
     if df is None or df.empty:
         st.warning("Nenhum dado encontrado.")
@@ -295,7 +289,9 @@ def pagina_reinf():
     st.download_button("Baixar Excel", data=output.getvalue(), file_name="reinf.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
+
 def pagina_dctf_web():
+    st.empty()  # Limpa renderizações anteriores
     import streamlit as st
     import pandas as pd
     from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
@@ -413,6 +409,7 @@ def pagina_dctf_web():
 
 
 def pagina_dms():
+    st.empty()  # Limpa renderizações anteriores
     df = le_planilha_google(GOOGLE_SHEET_URL, SHEET_EMPRESAS)
     if df is None:
         return
@@ -470,7 +467,9 @@ def pagina_dms():
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
+
 def pagina_rest():
+    st.empty()  # Limpa renderizações anteriores
     df = le_planilha_google(GOOGLE_SHEET_URL, SHEET_EMPRESAS)
     if df is None:
         return
@@ -526,6 +525,64 @@ def pagina_rest():
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
+
+def pagina_sefaz():
+    st.empty()  # Limpa renderizações anteriores
+    df = le_planilha_google(GOOGLE_SHEET_URL, SHEET_EMPRESAS)
+    if df is None:
+        return
+
+    competencia_raw = df.get("PERÍODO DE COMPETÊNCIA", [""])[0]
+    competencia = pd.to_datetime(competencia_raw, errors='coerce').strftime("%m/%Y") if competencia_raw else ""
+
+    df_sefaz = df[df["Situação"].astype(str).str.upper() == "ATIVA"] if "Situação" in df.columns else pd.DataFrame()
+    if df_sefaz.empty:
+        st.warning("Nenhuma empresa ATIVA encontrada para SEFAZ.")
+        return
+
+    # Seleciona as colunas
+    colunas = [
+        "Código", "Razão Social", "CNPJ", "Estado", "Insc. Estadual",
+        "XML ENTRADA", "XML SAÍDA", "IMPORTAÇÃO",
+        "TOTAL ENTRADA", "TOTAL SAÍDA", "TOTAL DOMÍNIO", "Situação"
+    ]
+    df_sefaz = df_sefaz[[c for c in colunas if c in df_sefaz.columns]]
+
+    # Calcula totalizadores baseados na coluna IMPORTAÇÃO
+    if "IMPORTAÇÃO" in df_sefaz.columns:
+        em_andamento = df_sefaz[df_sefaz["IMPORTAÇÃO"].astype(str).str.upper() == "EM ANDAMENTO"].shape[0]
+        outro_estado = df_sefaz[df_sefaz["IMPORTAÇÃO"].astype(str).str.upper() == "OUTRO ESTADO"].shape[0]
+        sem_movimento = df_sefaz[df_sefaz["IMPORTAÇÃO"].astype(str).str.upper() == "SEM MOVIMENTO"].shape[0]
+        concluido = df_sefaz[df_sefaz["IMPORTAÇÃO"].astype(str).str.upper() == "CONCLUÍDO"].shape[0]
+    else:
+        em_andamento = outro_estado = sem_movimento = concluido = 0
+
+    st.markdown(
+        f"<h2>SEFAZ</h2>"
+        f"<p style='text-align:right; font-size:20px;'>"
+        f"<b>Em andamento:</b> {em_andamento} | "
+        f"<b>Outro Estado:</b> {outro_estado} | "
+        f"<b>Sem movimento:</b> {sem_movimento} | "
+        f"<b>Concluído:</b> {concluido} | "
+        f"<b>Competência:</b> {competencia}</p>",
+        unsafe_allow_html=True
+    )
+
+    # Pausa de 1 segundo antes de mostrar o grid
+    time.sleep(1)
+
+    # Exibe tabela
+    exibe_aggrid(df_sefaz, height=400, grid_key="grid_sefaz")
+
+    # Download Excel
+    output = BytesIO()
+    df_sefaz.to_excel(output, index=False)
+    st.download_button(
+        "Baixar Excel",
+        data=output.getvalue(),
+        file_name="sefaz.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 # ---------------- Roteamento das páginas ----------------
 if pagina == "EMPRESAS":
     pagina_empresas()
@@ -539,3 +596,5 @@ elif pagina == "DMS":
     pagina_dms()
 elif pagina == "SERVIÇOS TOMADOS":
     pagina_rest()
+elif pagina == "SEFAZ":
+    pagina_sefaz()
