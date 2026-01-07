@@ -92,8 +92,8 @@ def le_planilha_google(url: str, aba: str):
 
 def exibe_aggrid(df, height=400, grid_key="grid"):
     """Exibe AgGrid com configurações padrão"""
-    # Cria key única com timestamp para evitar conflitos
-    unique_key = f"{grid_key}_{int(time.time() * 1000000)}"
+    # Key fixa baseada apenas no grid_key (sem timestamp)
+    # Isso mantém o estado dos filtros
     
     gb = GridOptionsBuilder.from_dataframe(df)
     
@@ -120,7 +120,7 @@ def exibe_aggrid(df, height=400, grid_key="grid"):
         rowHeight=30,
         enableBrowserTooltips=True,
         enableCellTextSelection=True,
-        suppressMenuHide=True,  # Mantém menu de filtro visível
+        suppressMenuHide=True,
         # Tradução para português
         localeText={
             'filterOoo': 'Filtrar...',
@@ -155,16 +155,16 @@ def exibe_aggrid(df, height=400, grid_key="grid"):
     
     grid_options = gb.build()
     
-    # Renderiza o grid
-    AgGrid(
+    # Renderiza o grid com key fixa
+    return AgGrid(
         df,
         gridOptions=grid_options,
         height=height,
-        key=unique_key,
+        key=grid_key,  # Key fixa sem timestamp
         fit_columns_on_grid_load=True,
         enable_enterprise_modules=False,
-        update_mode=GridUpdateMode.MODEL_CHANGED,  # Mantém o filtro ativo
-        reload_data=False  # Não recarrega dados ao interagir
+        update_mode=GridUpdateMode.MANUAL,  # Modo manual para não resetar
+        allow_unsafe_jscode=True
     )
 
 # ============================================================================
