@@ -560,8 +560,19 @@ def pagina_sefaz():
     # AJUSTE DE TIPO (SEM ALTERAR ESTRUTURA)
     # =========================================
     for col in ["TOTAL ENTRADA", "TOTAL SAÍDA", "TOTAL DOMÍNIO"]:
-        if col in df_sefaz.columns:
-            df_sefaz[col] = pd.to_numeric(df_sefaz[col], errors="coerce").fillna(0)
+    if col in df_sefaz.columns:
+        if pd.api.types.is_datetime64_any_dtype(df_sefaz[col]):
+            df_sefaz[col] = df_sefaz[col].astype(str)
+
+        df_sefaz[col] = (
+            df_sefaz[col]
+            .astype(str)
+            .str.replace(",", ".", regex=False)
+            .str.replace(r"[^\d.-]", "", regex=True)
+        )
+
+        df_sefaz[col] = pd.to_numeric(df_sefaz[col], errors="coerce").fillna(0)
+
 
     # Calcula totalizadores baseados na coluna IMPORTAÇÃO
     if "IMPORTAÇÃO" in df_sefaz.columns:
