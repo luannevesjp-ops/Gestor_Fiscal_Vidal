@@ -292,9 +292,6 @@ def pagina_reinf():
 
 def pagina_dctf_web():
     st.empty()  # Limpa renderizações anteriores
-    import streamlit as st
-    import pandas as pd
-    from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
 
     df = le_planilha_google(GOOGLE_SHEET_URL, SHEET_EMPRESAS)
 
@@ -379,7 +376,7 @@ def pagina_dctf_web():
         nao_concluidas = 0
 
     # =========================
-    # CABEÇALHO (estrutura preservada)
+    # CABEÇALHO
     # =========================
     st.markdown(
         f"<h2>DCTF WEB</h2>"
@@ -405,6 +402,17 @@ def pagina_dctf_web():
         update_mode=GridUpdateMode.NO_UPDATE,
         fit_columns_on_grid_load=True,
         height=600
+    )
+        # =========================
+    # DOWNLOAD EXCEL
+    # =========================
+    output = BytesIO()
+    df_dctf.to_excel(output, index=False)
+    st.download_button(
+        "Baixar Excel",
+        data=output.getvalue(),
+        file_name="dctf_web.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
 
@@ -548,6 +556,13 @@ def pagina_sefaz():
     ]
     df_sefaz = df_sefaz[[c for c in colunas if c in df_sefaz.columns]]
 
+    # =========================================
+    # AJUSTE DE TIPO (SEM ALTERAR ESTRUTURA)
+    # =========================================
+    for col in ["TOTAL ENTRADA", "TOTAL SAÍDA", "TOTAL DOMÍNIO"]:
+        if col in df_sefaz.columns:
+            df_sefaz[col] = pd.to_numeric(df_sefaz[col], errors="coerce").fillna(0)
+
     # Calcula totalizadores baseados na coluna IMPORTAÇÃO
     if "IMPORTAÇÃO" in df_sefaz.columns:
         em_andamento = df_sefaz[df_sefaz["IMPORTAÇÃO"].astype(str).str.upper() == "EM ANDAMENTO"].shape[0]
@@ -583,6 +598,7 @@ def pagina_sefaz():
         file_name="sefaz.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
 # ---------------- Roteamento das páginas ----------------
 if pagina == "EMPRESAS":
     pagina_empresas()
