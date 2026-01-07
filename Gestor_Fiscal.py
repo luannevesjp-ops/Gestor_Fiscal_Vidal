@@ -112,14 +112,45 @@ def exibe_aggrid(df, height=400, grid_key="grid"):
         else:
             gb.configure_column(col, filter="agTextColumnFilter")
     
-    # Configurações gerais do grid
+    # Configurações gerais do grid com localização em português
     gb.configure_grid_options(
         domLayout="normal",
         floatingFilter=True,
         headerHeight=40,
         rowHeight=30,
         enableBrowserTooltips=True,
-        enableCellTextSelection=True
+        enableCellTextSelection=True,
+        suppressMenuHide=True,  # Mantém menu de filtro visível
+        # Tradução para português
+        localeText={
+            'filterOoo': 'Filtrar...',
+            'searchOoo': 'Pesquisar...',
+            'contains': 'Contém',
+            'notContains': 'Não contém',
+            'equals': 'Igual',
+            'notEqual': 'Diferente',
+            'startsWith': 'Começa com',
+            'endsWith': 'Termina com',
+            'blank': 'Em branco',
+            'notBlank': 'Não em branco',
+            'andCondition': 'E',
+            'orCondition': 'OU',
+            'applyFilter': 'Aplicar',
+            'resetFilter': 'Limpar',
+            'clearFilter': 'Limpar filtro',
+            'lessThan': 'Menor que',
+            'greaterThan': 'Maior que',
+            'lessThanOrEqual': 'Menor ou igual',
+            'greaterThanOrEqual': 'Maior ou igual',
+            'inRange': 'Entre',
+            'pinColumn': 'Fixar coluna',
+            'autosizeThiscolumn': 'Ajustar esta coluna',
+            'autosizeAllColumns': 'Ajustar todas as colunas',
+            'groupBy': 'Agrupar por',
+            'resetColumns': 'Resetar colunas',
+            'noRowsToShow': 'Nenhum registro para mostrar',
+            'loadingOoo': 'Carregando...',
+        }
     )
     
     grid_options = gb.build()
@@ -132,7 +163,8 @@ def exibe_aggrid(df, height=400, grid_key="grid"):
         key=unique_key,
         fit_columns_on_grid_load=True,
         enable_enterprise_modules=False,
-        update_mode=GridUpdateMode.NO_UPDATE
+        update_mode=GridUpdateMode.MODEL_CHANGED,  # Mantém o filtro ativo
+        reload_data=False  # Não recarrega dados ao interagir
     )
 
 # ============================================================================
