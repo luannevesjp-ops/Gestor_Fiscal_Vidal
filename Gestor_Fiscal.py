@@ -9,6 +9,8 @@ from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
 from io import BytesIO
 import requests
 import time
+import os
+import base64
 
 # ============================================================================
 # CONFIGURAÇÕES INICIAIS
@@ -17,9 +19,16 @@ import time
 # Configuração da página
 st.set_page_config(page_title="LuaTech - Gestão Fiscal", layout="wide")
 
+# Placeholder global para limpar toda a interface ao mudar página
+if 'main_container' not in st.session_state:
+    st.session_state.main_container = st.empty()
+
 # URL do Google Sheets
 GOOGLE_SHEET_URL = "https://docs.google.com/spreadsheets/d/1bp7qtkKvsMHMvHjGznT6OwyX_YSQWMa3jVvylOJWSxM/export?format=xlsx"
 SHEET_EMPRESAS = "GERAL"
+
+# Caminho da pasta de PDFs (OneDrive)
+PASTA_PDFS = r"C:\Users\luann\OneDrive\Documentos\DESENVOLVIMENTO\PY\PROGRAMA\VIDAL\CNDS\PREFEITURA"
 
 # ============================================================================
 # CSS E ESTILOS
@@ -90,7 +99,7 @@ def le_planilha_google(url: str, aba: str):
         return None
 
 
-def exibe_aggrid(df, height=400, grid_key="grid"):
+def exibe_aggrid(df, height=400, grid_key="grid", selection_mode='none'):
     """Exibe AgGrid com configurações padrão"""
     # Key fixa baseada apenas no grid_key (sem timestamp)
     # Isso mantém o estado dos filtros
@@ -104,6 +113,9 @@ def exibe_aggrid(df, height=400, grid_key="grid"):
         editable=False,
         resizable=True
     )
+    
+    if selection_mode != 'none':
+        gb.configure_selection(selection_mode=selection_mode, use_checkbox=True)
     
     # Configura filtros corretos por tipo de coluna
     for col in df.columns:
@@ -156,16 +168,125 @@ def exibe_aggrid(df, height=400, grid_key="grid"):
     grid_options = gb.build()
     
     # Renderiza o grid com key fixa
+    # Define eventos que devem causar update
+    if selection_mode != 'none':
+        update_on = ['selectionChanged']
+    else:
+        update_on = []
+    
     return AgGrid(
         df,
         gridOptions=grid_options,
         height=height,
-        key=grid_key,  # Key fixa sem timestamp
+        key=grid_key,
         fit_columns_on_grid_load=True,
         enable_enterprise_modules=False,
-        update_mode=GridUpdateMode.MANUAL,  # Modo manual para não resetar
-        allow_unsafe_jscode=True
+        update_on=update_on,  # ← NOVO PARÂMETRO (substitui update_mode)
+        allow_unsafe_jscode=True,
+        reload_data=False
     )
+
+
+def exibe_aggrid_com_oculta(df, height=400, grid_key="grid", selection_mode='none', colunas_ocultas=None):
+    """Exibe AgGrid com colunas ocultas mas mantendo dados para filtros"""
+    
+    if colunas_ocultas is None:
+        colunas_ocultas = []
+    
+    gb = GridOptionsBuilder.from_dataframe(df)
+    
+    # Configuração padrão para todas as colunas
+    gb.configure_default_column(
+        filter=True,
+        sortable=True,
+        editable=False,
+        resizable=True
+    )
+    
+    if selection_mode != 'none':
+        gb.configure_selection(selection_mode=selection_mode, use_checkbox=True)
+    
+    # Configura filtros e oculta colunas especificadas
+    for col in df.columns:
+        if col in colunas_ocultas:
+            # Oculta a coluna mas mantém dados
+            gb.configure_column(col, hide=True)
+        elif pd.api.types.is_numeric_dtype(df[col]):
+            gb.configure_column(col, filter="agNumberColumnFilter")
+        else:
+            gb.configure_column(col, filter="agTextColumnFilter")
+    
+    # Configurações gerais do grid com localização em português
+    gb.configure_grid_options(
+        domLayout="normal",
+        floatingFilter=True,
+        headerHeight=40,
+        rowHeight=30,
+        enableBrowserTooltips=True,
+        enableCellTextSelection=True,
+        suppressMenuHide=True,
+        localeText={
+            'filterOoo': 'Filtrar...',
+            'searchOoo': 'Pesquisar...',
+            'contains': 'Contém',
+            'notContains': 'Não contém',
+            'equals': 'Igual',
+            'notEqual': 'Diferente',
+            'startsWith': 'Começa com',
+            'endsWith': 'Termina com',
+            'blank': 'Em branco',
+            'notBlank': 'Não em branco',
+            'andCondition': 'E',
+            'orCondition': 'OU',
+            'applyFilter': 'Aplicar',
+            'resetFilter': 'Limpar',
+            'clearFilter': 'Limpar filtro',
+            'lessThan': 'Menor que',
+            'greaterThan': 'Maior que',
+            'lessThanOrEqual': 'Menor ou igual',
+            'greaterThanOrEqual': 'Maior ou igual',
+            'inRange': 'Entre',
+            'pinColumn': 'Fixar coluna',
+            'autosizeThiscolumn': 'Ajustar esta coluna',
+            'autosizeAllColumns': 'Ajustar todas as colunas',
+            'groupBy': 'Agrupar por',
+            'resetColumns': 'Resetar colunas',
+            'noRowsToShow': 'Nenhum registro para mostrar',
+            'loadingOoo': 'Carregando...',
+        }
+    )
+    
+    grid_options = gb.build()
+    
+    # Renderiza o grid
+    # Define eventos que devem causar update
+    if selection_mode != 'none':
+        update_on = ['selectionChanged']
+    else:
+        update_on = []
+    
+    return AgGrid(
+        df,
+        gridOptions=grid_options,
+        height=height,
+        key=grid_key,
+        fit_columns_on_grid_load=True,
+        enable_enterprise_modules=False,
+        update_on=update_on,  # ← NOVO PARÂMETRO (substitui update_mode)
+        allow_unsafe_jscode=True,
+        reload_data=False
+    )
+
+
+def visualizar_pdf(caminho_pdf):
+    """Função para exibir o PDF em um iframe"""
+    try:
+        with open(caminho_pdf, "rb") as f:
+            base64_pdf = base64.b64encode(f.read()).decode('utf-8')
+        pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="800" type="application/pdf"></iframe>'
+        st.markdown(pdf_display, unsafe_allow_html=True)
+    except Exception as e:
+        st.error(f"Erro ao carregar o PDF: {e}")
 
 # ============================================================================
 # AUTENTICAÇÃO / LOGIN
@@ -208,7 +329,7 @@ st.sidebar.markdown(menu_html, unsafe_allow_html=True)
 
 pagina = st.sidebar.radio(
     "",
-    ["EMPRESAS", "SIMPLES NACIONAL", "REINF", "DCTF WEB", "DMS", "SERVIÇOS TOMADOS", "SEFAZ"],
+    ["EMPRESAS", "SIMPLES NACIONAL", "REINF", "DCTF WEB", "DMS", "SERVIÇOS TOMADOS", "SEFAZ", "CND Municipal"],
     index=0,
     label_visibility="collapsed"
 )
@@ -308,7 +429,6 @@ def pagina_simples():
         f"<h2>SIMPLES NACIONAL</h2>"
         f"<p style='text-align:right; font-size:20px;'>"
         f"<b>Concluídas:</b> {concluidas} | "
-        f"<b>Filial:</b> {filial} | "
         f"<b>Não concluídas:</b> {nao_concluidas} | "
         f"<b>Competência:</b> {competencia}</p>",
         unsafe_allow_html=True
@@ -498,7 +618,7 @@ def pagina_dctf_web():
         fit_columns_on_grid_load=True,
         height=600
     )
-        # =========================
+    # =========================
     # DOWNLOAD EXCEL
     # =========================
     output = BytesIO()
@@ -509,7 +629,6 @@ def pagina_dctf_web():
         file_name="dctf_web.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
-
 
 
 def pagina_dms():
@@ -702,22 +821,173 @@ def pagina_sefaz():
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
+def pagina_cnd_municipal():
+    """Página CND Municipal com visualização de PDF sobreposta"""
+    st.empty()
+    
+    df = le_planilha_google(GOOGLE_SHEET_URL, SHEET_EMPRESAS)
+    if df is None: 
+        return
+    
+    competencia_raw = df.get("PERÍODO DE COMPETÊNCIA", [""])[0]
+    competencia = pd.to_datetime(competencia_raw, errors='coerce').strftime("%m/%Y") if competencia_raw else ""
+    
+    # Filtra somente ATIVAS
+    df_cnd = df[df["Situação"].astype(str).str.upper() == "ATIVA"] if "Situação" in df.columns else pd.DataFrame()
+    
+    if df_cnd.empty:
+        st.warning("Nenhuma empresa ATIVA encontrada.")
+        return
+    
+    # Verifica se as colunas existem na planilha
+    colunas_disponiveis = df_cnd.columns.tolist()
+    
+    # Seleção de colunas (corrigindo os nomes exatos)
+    colunas_solicitadas = [
+        "Código", "Razão Social", "CNPJ", "Município", "Estado", 
+        "SITUAÇÃO CND MUNICIPAL", "VALIDADE", "Situação"
+    ]
+    
+    # Filtra apenas colunas que existem
+    colunas_existentes = [c for c in colunas_solicitadas if c in colunas_disponiveis]
+    df_cnd = df_cnd[colunas_existentes].copy()
+    
+    # Formata a coluna VALIDADE (só data, sem hora)
+    if "VALIDADE" in df_cnd.columns:
+        df_cnd["VALIDADE"] = pd.to_datetime(df_cnd["VALIDADE"], errors='coerce').dt.strftime("%d/%m/%Y")
+        df_cnd["VALIDADE"] = df_cnd["VALIDADE"].fillna("")
+    
+    # Função para verificar se o PDF existe
+    def check_pdf(cnpj):
+        cnpj_limpo = str(cnpj).replace(".", "").replace("/", "").replace("-", "").strip()
+        nome_arquivo = f"{cnpj_limpo}_Certidao_Municipal.pdf"
+        caminho_completo = os.path.join(PASTA_PDFS, nome_arquivo)
+        return "Disponível" if os.path.exists(caminho_completo) else "Indisponível"
+
+    # Adiciona coluna de status do PDF
+    df_cnd["PDF"] = df_cnd["CNPJ"].apply(check_pdf)
+    
+    # ========== TOTALIZADORES ==========
+    positivas = 0
+    negativas = 0
+    positiva_efeito_negativa = 0
+    nao_geradas = 0
+    
+    if "SITUAÇÃO CND MUNICIPAL" in df_cnd.columns:
+        situacao_upper = df_cnd["SITUAÇÃO CND MUNICIPAL"].astype(str).str.upper().str.strip()
+        positivas = (situacao_upper == "POSITIVA").sum()
+        negativas = (situacao_upper == "NEGATIVA").sum()
+        positiva_efeito_negativa = (situacao_upper == "POSITIVA COM EFEITO NEGATIVA").sum()
+        # Não geradas = células vazias ou NaN
+        nao_geradas = (
+            (situacao_upper == "") | 
+            (situacao_upper == "NAN") | 
+            (df_cnd["SITUAÇÃO CND MUNICIPAL"].isna())
+        ).sum()
+    
+    total_geral = df_cnd.shape[0]
+    
+    # Inicializa estado de visualização APÓS carregar dados
+    if "visualizando_pdf" not in st.session_state:
+        st.session_state.visualizando_pdf = False
+        st.session_state.pdf_selecionado = None
+    
+    # ========== MODO VISUALIZAÇÃO PDF ==========
+    if st.session_state.visualizando_pdf and st.session_state.pdf_selecionado:
+        # Botão voltar no topo
+        if st.button("← Voltar para a lista", type="primary"):
+            st.session_state.visualizando_pdf = False
+            st.session_state.pdf_selecionado = None
+            st.rerun()
+        
+        st.divider()
+        
+        row = st.session_state.pdf_selecionado
+        cnpj = row["CNPJ"]
+        razao = row["Razão Social"]
+        status_pdf = row["PDF"]
+        
+        cnpj_limpo = str(cnpj).replace(".", "").replace("/", "").replace("-", "").strip()
+        nome_arquivo = f"{cnpj_limpo}_Certidao_Municipal.pdf"
+        caminho_completo = os.path.join(PASTA_PDFS, nome_arquivo)
+        
+        st.subheader(f"📄 {razao}")
+        st.caption(f"CNPJ: {cnpj}")
+        
+        if status_pdf == "Disponível":
+            visualizar_pdf(caminho_completo)
+        else:
+            st.error(f"❌ Arquivo não encontrado: {nome_arquivo}")
+            st.info(f"📁 Caminho verificado: {caminho_completo}")
+    
+    # ========== MODO LISTAGEM ==========
+    else:
+        st.markdown(
+            f"<h2>CND Municipal</h2>"
+            f"<p style='text-align:right; font-size:20px;'>"
+            f"<b>Positivas:</b> {positivas} | "
+            f"<b>Negativas:</b> {negativas} | "
+            f"<b>Positiva c/ efeito negativa:</b> {positiva_efeito_negativa} | "
+            f"<b>Não geradas:</b> {nao_geradas} | "
+            f"<b>Total:</b> {total_geral} | "
+            f"<b>Competência:</b> {competencia}</p>", 
+            unsafe_allow_html=True
+        )
+        
+        st.info("💡 Selecione uma linha na tabela para visualizar o PDF correspondente.")
+        
+        # Exibe o Grid com seleção e coluna Situação oculta
+        with st.container():
+            grid_response = exibe_aggrid_com_oculta(
+                df_cnd, 
+                height=400, 
+                grid_key="grid_cnd_municipal", 
+                selection_mode='single',
+                colunas_ocultas=["Situação"]
+            )
+        
+        selected_rows = grid_response.get('selected_rows', [])
+        
+        # Se houver linha selecionada, atualiza o estado
+        if selected_rows is not None and len(selected_rows) > 0:
+            if isinstance(selected_rows, pd.DataFrame):
+                row = selected_rows.iloc[0].to_dict()
+            else:
+                row = selected_rows[0]
+            
+            st.session_state.pdf_selecionado = row
+            st.session_state.visualizando_pdf = True
+            st.rerun()
+        
+        # Download Excel
+        output = BytesIO()
+        df_cnd.to_excel(output, index=False)
+        st.download_button(
+            "📥 Baixar Excel",
+            data=output.getvalue(),
+            file_name="cnd_municipal.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 
 # ============================================================================
 # ROTEAMENTO DE PÁGINAS
 # ============================================================================
 
-if pagina == "EMPRESAS":
-    pagina_empresas()
-elif pagina == "SIMPLES NACIONAL":
-    pagina_simples()
-elif pagina == "REINF":
-    pagina_reinf()
-elif pagina == "DCTF WEB":
-    pagina_dctf_web()
-elif pagina == "DMS":
-    pagina_dms()
-elif pagina == "SERVIÇOS TOMADOS":
-    pagina_rest()
-elif pagina == "SEFAZ":
-    pagina_sefaz()
+# Limpa container anterior ao mudar página
+with st.session_state.main_container.container():
+    if pagina == "EMPRESAS":
+        pagina_empresas()
+    elif pagina == "SIMPLES NACIONAL":
+        pagina_simples()
+    elif pagina == "REINF":
+        pagina_reinf()
+    elif pagina == "DCTF WEB":
+        pagina_dctf_web()
+    elif pagina == "DMS":
+        pagina_dms()
+    elif pagina == "SERVIÇOS TOMADOS":
+        pagina_rest()
+    elif pagina == "SEFAZ":
+        pagina_sefaz()
+    elif pagina == "CND Municipal":
+        pagina_cnd_municipal()
