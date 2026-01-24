@@ -535,10 +535,31 @@ def pagina_cnd_municipal():
         st.session_state.pdf_selecionado = None
     
     if st.session_state.visualizando_pdf and st.session_state.pdf_selecionado:
-        if st.button("← Voltar para a lista", type="primary"):
-            st.session_state.visualizando_pdf = False
-            st.session_state.pdf_selecionado = None
-            st.rerun()
+        col1, col2 = st.columns([6, 1])
+        
+        with col1:
+            if st.button("← Voltar para a lista", type="primary"):
+                st.session_state.visualizando_pdf = False
+                st.session_state.pdf_selecionado = None
+                st.rerun()
+        
+        with col2:
+            row = st.session_state.pdf_selecionado
+            link_pdf = row.get("LINK CND MUNICIPAL", "")
+            
+            if link_pdf and "drive.google.com" in str(link_pdf):
+                # Converte para link de download direto
+                if "/file/d/" in link_pdf:
+                    file_id = link_pdf.split("/file/d/")[1].split("/")[0]
+                    download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+                    
+                    st.markdown(
+                        f'<a href="{download_url}" target="_blank">'
+                        f'<button style="background-color:#1d3f77; color:white; padding:8px 16px; '
+                        f'border:none; border-radius:4px; cursor:pointer; font-size:14px;">'
+                        f'📥 Baixar PDF</button></a>',
+                        unsafe_allow_html=True
+                    )
         
         st.divider()
         row = st.session_state.pdf_selecionado
