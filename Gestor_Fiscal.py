@@ -16,13 +16,16 @@ import base64
 # CONFIGURAÇÕES INICIAIS
 # ============================================================================
 
-st.set_page_config(page_title="LuaTech - Gestão Fiscal", layout="wide")
+st.set_page_config(page_title="LUATECH-GESTÃO-VIDAL", layout="wide")
 
 if 'main_container' not in st.session_state:
     st.session_state.main_container = st.empty()
 
 GOOGLE_SHEET_URL = "https://docs.google.com/spreadsheets/d/1bp7qtkKvsMHMvHjGznT6OwyX_YSQWMa3jVvylOJWSxM/export?format=xlsx"
 SHEET_EMPRESAS = "GERAL"
+SHEET_XML_DMS  = "Leitura Xml DMS"
+SHEET_XML_REST = "Leitura Xml REST"
+SHEET_SEFAZ = "SEFAZ"
 
 # ============================================================================
 # CSS E ESTILOS
@@ -74,6 +77,11 @@ st.markdown("""
 .menu-btn button:hover {
     background-color: #163066 !important;
 }
+.ag-body-horizontal-scroll { display: block !important; }
+.ag-body-horizontal-scroll-viewport { display: block !important; }
+.ag-root-wrapper { overflow: visible !important; }
+.ag-body-horizontal-scroll { opacity: 1 !important; height: 16px !important; }
+.ag-body-horizontal-scroll-viewport { overflow-x: scroll !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -252,10 +260,10 @@ st.sidebar.markdown("<hr style='margin: 8px 0;'>", unsafe_allow_html=True)
 # Define as páginas disponíveis por área
 if st.session_state["menu_area"] == "FISCAL":
     paginas_disponiveis = ["EMPRESAS", "SIMPLES NACIONAL", "REINF", "DCTF WEB",
-                           "DMS", "SERVIÇOS TOMADOS", "SEFAZ"]
+                           "DMS", "SERVIÇOS TOMADOS", "SEFAZ", "LEITURA XML DMS", "LEITURA XML REST","SEFAZ COMPARAÇÃO"]
 
 elif st.session_state["menu_area"] == "PARALEGAL":
-    paginas_disponiveis = ["Dashboard", "EMPRESAS", "CND Municipal"]
+    paginas_disponiveis = ["DASHBOARD", "EMPRESAS", "CND MUNICIPAL", "SEM ACESSO"]
 
 elif st.session_state["menu_area"] == "CONTÁBIL":
     paginas_disponiveis = ["EMPRESAS"]
@@ -263,8 +271,8 @@ elif st.session_state["menu_area"] == "CONTÁBIL":
 else:
     paginas_disponiveis = ["EMPRESAS"]
 
-pagina = st.sidebar.radio("", paginas_disponiveis,
-                          index=0, label_visibility="collapsed")
+pagina = st.sidebar.radio("Menu", paginas_disponiveis,
+                          label_visibility="collapsed")
 
 if "pagina_atual" not in st.session_state:
     st.session_state["pagina_atual"] = pagina
@@ -294,12 +302,14 @@ def pagina_empresas():
     
     colunas = ["Código", "Razão Social", "CNPJ", "Regime", "Município", "Estado", "Matriz / Filial", "Situação"]
     df_empresas = df_empresas[[c for c in colunas if c in df_empresas.columns]]
+    df_empresas = _sanitiza_df(df_empresas)   # ← ADICIONE AQUI
     total_empresas = df_empresas.shape[0]
     
     st.subheader("Empresas - Apenas ATIVAS")
     st.markdown(f"<p style='text-align:right; font-size:20px;'><b>Total:</b> {total_empresas} | <b>Competência:</b> {competencia}</p>", unsafe_allow_html=True)
     
     with st.container():
+        df_empresas = _sanitiza_df(df_empresas)
         exibe_aggrid(df_empresas, height=400, grid_key="grid_empresas")
     
     output = BytesIO()
@@ -308,82 +318,370 @@ def pagina_empresas():
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
+import re  # adicione no topo do arquivo se ainda não tiver
+
+# ── helper CNPJ ─────────────────────────────────────────────────────────────
+def _normaliza_cnpj(val):
+    """Remove formatação e garante 14 dígitos — remove dígito extra à direita se vier com 15."""
+    digits = re.sub(r'\D', '', str(val))
+    if len(digits) == 15:
+        digits = digits[:14]   # remove o dígito extra da direita
+    return digits.zfill(14)
+
+
+def _formata_cnpj_mascara(val):
+    """00000000000000 → 00.000.000/0000-00"""
+    digits = re.sub(r'\D', '', str(val))
+    if len(digits) == 15:
+        digits = digits[:14]
+    digits = digits.zfill(14)
+    return f"{digits[:2]}.{digits[2:5]}.{digits[5:8]}/{digits[8:12]}-{digits[12:14]}"
+
+@st.dialog("Simples Nacional — Não Concluídas")
+def _modal_simples_nao_concluidas(df_show):
+    st.markdown(f"**{df_show.shape[0]} empresa(s) não concluída(s)**")
+    cols = [c for c in ["Código", "Razão Social", "CNPJ", "Município",
+                        "SIMPLES GERADO", "MOTIVO SITUAÇÃO DO DAS"]
+            if c in df_show.columns]
+    df_exib = df_show[cols].copy()
+    if "CNPJ" in df_exib.columns:
+        df_exib["CNPJ"] = df_exib["CNPJ"].apply(_normaliza_cnpj)
+    st.dataframe(df_exib.reset_index(drop=True),
+                 use_container_width=True, hide_index=True)
+
+
+
 def pagina_simples():
+    import plotly.graph_objects as go
     st.empty()
+
     df = le_planilha_google(GOOGLE_SHEET_URL, SHEET_EMPRESAS)
     if df is None:
         return
-    
-    competencia_raw = df.get("PERÍODO DE COMPETÊNCIA", [""])[0]
-    competencia = pd.to_datetime(competencia_raw, errors='coerce').strftime("%m/%Y") if competencia_raw else ""
-    
-    df_ativas = df[(df["Situação"].astype(str).str.upper() == "ATIVA") & 
-                   (df["Regime"].astype(str).str.upper() == "SIMPLES NACIONAL")] if "Situação" in df.columns else pd.DataFrame()
-    
+
+    competencia_raw = df["PERÍODO DE COMPETÊNCIA"].iloc[0] \
+        if "PERÍODO DE COMPETÊNCIA" in df.columns else ""
+    competencia = pd.to_datetime(competencia_raw, errors="coerce").strftime("%m/%Y") \
+        if competencia_raw else ""
+
+    if "Situação" not in df.columns:
+        st.error("Coluna 'Situação' não encontrada.")
+        return
+
+    df_ativas = df[
+        (df["Situação"].astype(str).str.upper() == "ATIVA") &
+        (df["Regime"].astype(str).str.upper() == "SIMPLES NACIONAL")
+    ].copy()
+
     if df_ativas.empty:
         st.warning("Nenhuma empresa SIMPLES NACIONAL ATIVA encontrada.")
         return
-    
-    colunas = ["Código", "Razão Social", "CNPJ", "Regime", "Município", "Estado", "SIMPLES GERADO", "Situação"]
-    df_simples = df_ativas[[c for c in colunas if c in df_ativas.columns]]
-    df_simples["SIMPLES GERADO"] = df_simples["SIMPLES GERADO"].apply(
-        lambda x: "Filial" if str(x).upper() == "FILIAL" else ("Concluída" if pd.notna(x) else "Não"))
-    
-    concluidas = df_simples[df_simples["SIMPLES GERADO"].isin(["Concluída", "Filial"])].shape[0]
-    nao_concluidas = df_simples[df_simples["SIMPLES GERADO"] == "Não"].shape[0]
-    
-    st.markdown(f"<h2>SIMPLES NACIONAL</h2><p style='text-align:right; font-size:20px;'>"
-                f"<b>Concluídas:</b> {concluidas} | <b>Não concluídas:</b> {nao_concluidas} | "
-                f"<b>Competência:</b> {competencia}</p>", unsafe_allow_html=True)
-    
-    time.sleep(1)
+
+    # ── detecta filiais pela coluna MATRIZ / FILIAL ───────────────────────────
+    if "MATRIZ / FILIAL" in df_ativas.columns:
+        mask_filial = df_ativas["MATRIZ / FILIAL"].astype(str).str.strip().str.upper() == "FILIAL"
+    else:
+        mask_filial = pd.Series([False] * len(df_ativas), index=df_ativas.index)
+
+    df_filiais    = df_ativas[mask_filial].copy()
+    df_nao_filial = df_ativas[~mask_filial].copy()
+
+    # ── colunas para exibição ─────────────────────────────────────────────────
+    colunas = ["Código", "Razão Social", "CNPJ", "Regime", "Município", "Estado",
+               "SIMPLES GERADO", "MOTIVO SITUAÇÃO DO DAS", "Situação"]
+
+    df_nao_filial = df_nao_filial[[c for c in colunas if c in df_nao_filial.columns]].copy()
+    df_filiais    = df_filiais[[c for c in colunas if c in df_filiais.columns]].copy()
+
+    # ── CNPJ: 14 dígitos ─────────────────────────────────────────────────────
+    for _df in [df_nao_filial, df_filiais]:
+        if "CNPJ" in _df.columns:
+            _df["CNPJ"] = _df["CNPJ"].apply(_normaliza_cnpj)
+
+    # ── classificação das não-filiais ─────────────────────────────────────────
+    def _classifica(val):
+        v = str(val).strip().upper() \
+            if pd.notna(val) and str(val).strip() not in ("", "NAN") else ""
+        if "CONCLUÍDA" in v or "CONCLUIDA" in v:
+            return "Concluída"
+        return "Não Concluída"
+
+    if "SIMPLES GERADO" in df_nao_filial.columns:
+        df_nao_filial["SIMPLES GERADO"] = df_nao_filial["SIMPLES GERADO"].apply(_classifica)
+
+    if "SIMPLES GERADO" in df_filiais.columns:
+        df_filiais["SIMPLES GERADO"] = "Filial"
+
+    # ── df final para a tabela ────────────────────────────────────────────────
+    df_simples = pd.concat([df_nao_filial, df_filiais], ignore_index=True)
+
+    # ── contagens ─────────────────────────────────────────────────────────────
+    concluidas     = (df_nao_filial["SIMPLES GERADO"] == "Concluída").sum()
+    nao_concluidas = (df_nao_filial["SIMPLES GERADO"] == "Não Concluída").sum()
+    filiais        = len(df_filiais)
+    total          = concluidas + nao_concluidas
+
+    st.markdown("<h2>SIMPLES NACIONAL</h2>", unsafe_allow_html=True)
+    st.markdown(
+        f"<p style='text-align:right; font-size:20px;'>"
+        f"<b>Concluídas:</b> {concluidas} &nbsp;|&nbsp; "
+        f"<b>Não concluídas:</b> {nao_concluidas} &nbsp;|&nbsp; "
+        f"<b>Filiais:</b> {filiais} &nbsp;|&nbsp; "
+        f"<b>Competência:</b> {competencia}</p>",
+        unsafe_allow_html=True,
+    )
+
+    # ── donut ─────────────────────────────────────────────────────────────────
+    if "simples_chart_key" not in st.session_state:
+        st.session_state["simples_chart_key"] = 0
+
+    pct_c  = round(concluidas     / total * 100) if total else 0
+    pct_nc = round(nao_concluidas / total * 100) if total else 0
+
+    fig = go.Figure(data=[go.Pie(
+        labels=["Concluídas", "Não Concluídas"],
+        values=[int(concluidas), int(nao_concluidas)],
+        hole=0.68,
+        marker=dict(
+            colors=["#27ae60", "#e74c3c"],
+            line=dict(color="#ffffff", width=3),
+        ),
+        textinfo="none",
+        hovertemplate="<b>%{label}</b><br>%{value} empresa(s) — %{percent}<extra></extra>",
+        direction="clockwise",
+        sort=False,
+    )])
+
+    fig.update_layout(
+        paper_bgcolor="white", plot_bgcolor="white",
+        showlegend=False,
+        margin=dict(t=20, b=20, l=20, r=20),
+        height=300,
+        annotations=[dict(
+            text=f"<b>{total}</b><br><span style='font-size:11px'>empresas</span>",
+            x=0.5, y=0.5,
+            xanchor="center", yanchor="middle",
+            showarrow=False,
+            font=dict(size=22, color="#1d3f77"),
+        )],
+    )
+
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        key=f"chart_simples_{st.session_state['simples_chart_key']}",
+    )
+
+    col_l, col_r = st.columns(2)
+    with col_l:
+        st.markdown(
+            f"<div style='text-align:center; padding:8px; background:#f0faf4; "
+            f"border-radius:8px; border-left:4px solid #27ae60;'>"
+            f"<span style='font-size:22px; font-weight:700; color:#27ae60;'>{concluidas}</span><br>"
+            f"<span style='font-size:13px; color:#555;'>Concluídas ({pct_c}%)</span></div>",
+            unsafe_allow_html=True,
+        )
+    with col_r:
+        st.markdown(
+            f"<div style='text-align:center; padding:8px; background:#fdf2f2; "
+            f"border-radius:8px; border-left:4px solid #e74c3c;'>"
+            f"<span style='font-size:22px; font-weight:700; color:#e74c3c;'>{nao_concluidas}</span><br>"
+            f"<span style='font-size:13px; color:#555;'>Não Concluídas ({pct_nc}%)</span></div>",
+            unsafe_allow_html=True,
+        )
+        if st.button("Ver empresas não concluídas", use_container_width=True,
+                     key="btn_nao_concluidas"):
+            df_nc = df_nao_filial[df_nao_filial["SIMPLES GERADO"] == "Não Concluída"]
+            _modal_simples_nao_concluidas(df_nc)
+
+    st.divider()
+
+    # ── tabela principal ──────────────────────────────────────────────────────
+    df_simples = _sanitiza_df(df_simples)
     exibe_aggrid(df_simples, height=400, grid_key="grid_simples")
-    
+
     output = BytesIO()
     df_simples.to_excel(output, index=False)
-    st.download_button("Baixar Excel", data=output.getvalue(), file_name="simples_nacional.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.download_button(
+        "Baixar Excel", data=output.getvalue(),
+        file_name="simples_nacional.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 
+@st.dialog("REINF — Não Transmitidas")
+def _modal_reinf_nao_transmitidas(df_show):
+    st.markdown(f"**{df_show.shape[0]} empresa(s) não transmitida(s)**")
+    cols = [c for c in ["Código", "Razão Social", "CNPJ", "Município",
+                        "TRANSMISSÃO REINF", "MOTIVO SITUAÇÃO REINF"]
+            if c in df_show.columns]
+    df_exib = df_show[cols].copy()
+    if "CNPJ" in df_exib.columns:
+        df_exib["CNPJ"] = df_exib["CNPJ"].apply(_normaliza_cnpj)
+    st.dataframe(df_exib.reset_index(drop=True),
+                 use_container_width=True, hide_index=True)
+
+
+@st.fragment
 def pagina_reinf():
+    import plotly.graph_objects as go
     st.empty()
+
     df = le_planilha_google(GOOGLE_SHEET_URL, SHEET_EMPRESAS)
-    if df is None or df.empty:
-        st.warning("Nenhum dado encontrado.")
+    if df is None:
         return
-    
-    competencia_raw = df.get("PERÍODO DE COMPETÊNCIA", [""])[0]
-    competencia = pd.to_datetime(competencia_raw, errors='coerce').strftime("%m/%Y") if competencia_raw else ""
-    
-    df_reinf = df[df["Situação"].astype(str).str.upper() == "ATIVA"] if "Situação" in df.columns else pd.DataFrame()
-    if df_reinf.empty:
-        st.warning("Nenhuma empresa ATIVA para REINF.")
+
+    competencia_raw = df["PERÍODO DE COMPETÊNCIA"].iloc[0] \
+        if "PERÍODO DE COMPETÊNCIA" in df.columns else ""
+    competencia = pd.to_datetime(competencia_raw, errors="coerce").strftime("%m/%Y") \
+        if competencia_raw else ""
+
+    if "Situação" not in df.columns:
+        st.error("Coluna 'Situação' não encontrada.")
         return
-    
-    if "TRANSMISSÃO" in df_reinf.columns:
-        df_reinf["TRANSMISSÃO"] = df_reinf["TRANSMISSÃO"].astype(str).str.upper().replace({
-            "OK": "Transmitida", "FILIAL": "FILIAL", "NAN": "Não", "": "Não"})
+
+    df_ativas = df[df["Situação"].astype(str).str.upper() == "ATIVA"].copy()
+
+    if df_ativas.empty:
+        st.warning("Nenhuma empresa ATIVA encontrada para REINF.")
+        return
+
+    # ── detecta filiais pela coluna MATRIZ / FILIAL ───────────────────────────
+    if "MATRIZ / FILIAL" in df_ativas.columns:
+        mask_filial = df_ativas["MATRIZ / FILIAL"].astype(str).str.strip().str.upper() == "FILIAL"
     else:
-        df_reinf["TRANSMISSÃO"] = "Não"
-    
-    colunas = ["Código", "Razão Social", "CNPJ", "Regime", "TRANSMISSÃO", "Situação"]
-    df_reinf = df_reinf[[c for c in colunas if c in df_reinf.columns]]
-    
-    total_filial = df_reinf[df_reinf["TRANSMISSÃO"] == "FILIAL"].shape[0]
-    total_transmitida = df_reinf[df_reinf["TRANSMISSÃO"] == "Transmitida"].shape[0]
-    total_nao = df_reinf[df_reinf["TRANSMISSÃO"] == "Não"].shape[0]
-    
-    st.markdown(f"<h2>REINF</h2><p style='text-align:right; font-size:20px;'>"
-                f"<b>Filial:</b> {total_filial} | <b>Transmitida:</b> {total_transmitida} | "
-                f"<b>Não transmitida:</b> {total_nao} | <b>Competência:</b> {competencia}</p>", unsafe_allow_html=True)
-    
-    time.sleep(1)
+        mask_filial = pd.Series([False] * len(df_ativas), index=df_ativas.index)
+
+    df_filiais    = df_ativas[mask_filial].copy()
+    df_nao_filial = df_ativas[~mask_filial].copy()
+
+    # ── colunas para exibição ─────────────────────────────────────────────────
+    colunas = ["Código", "Razão Social", "CNPJ", "Regime", "Município", "Estado",
+               "TRANSMISSÃO REINF", "MOTIVO SITUAÇÃO REINF", "Situação"]
+
+    df_nao_filial = df_nao_filial[[c for c in colunas if c in df_nao_filial.columns]].copy()
+    df_filiais    = df_filiais[[c for c in colunas if c in df_filiais.columns]].copy()
+
+    # ── CNPJ: 14 dígitos ─────────────────────────────────────────────────────
+    for _df in [df_nao_filial, df_filiais]:
+        if "CNPJ" in _df.columns:
+            _df["CNPJ"] = _df["CNPJ"].apply(_normaliza_cnpj)
+
+    # ── classificação das não-filiais ─────────────────────────────────────────
+    def _classifica_reinf(val):
+        v = str(val).strip().upper() \
+            if pd.notna(val) and str(val).strip() not in ("", "NAN") else ""
+        if "CONCLUÍDA" in v or "CONCLUIDA" in v:
+            return "Transmitida"
+        return "Não Transmitida"
+
+    col_transm = "TRANSMISSÃO REINF"
+
+    if col_transm in df_nao_filial.columns:
+        df_nao_filial[col_transm] = df_nao_filial[col_transm].apply(_classifica_reinf)
+    else:
+        df_nao_filial[col_transm] = "Não Transmitida"
+
+    if col_transm in df_filiais.columns:
+        df_filiais[col_transm] = "Filial"
+    else:
+        df_filiais[col_transm] = "Filial"
+
+    # ── df final para a tabela ────────────────────────────────────────────────
+    df_reinf = pd.concat([df_nao_filial, df_filiais], ignore_index=True)
+
+    # ── contagens ─────────────────────────────────────────────────────────────
+    transmitidas     = (df_nao_filial[col_transm] == "Transmitida").sum()
+    nao_transmitidas = (df_nao_filial[col_transm] == "Não Transmitida").sum()
+    filiais          = len(df_filiais)
+    total            = transmitidas + nao_transmitidas
+
+    st.markdown("<h2>REINF</h2>", unsafe_allow_html=True)
+    st.markdown(
+        f"<p style='text-align:right; font-size:20px;'>"
+        f"<b>Transmitidas:</b> {transmitidas} &nbsp;|&nbsp; "
+        f"<b>Não transmitidas:</b> {nao_transmitidas} &nbsp;|&nbsp; "
+        f"<b>Filiais:</b> {filiais} &nbsp;|&nbsp; "
+        f"<b>Competência:</b> {competencia}</p>",
+        unsafe_allow_html=True,
+    )
+
+    # ── donut ─────────────────────────────────────────────────────────────────
+    if "reinf_chart_key" not in st.session_state:
+        st.session_state["reinf_chart_key"] = 0
+
+    pct_t  = round(transmitidas     / total * 100) if total else 0
+    pct_nt = round(nao_transmitidas / total * 100) if total else 0
+
+    fig = go.Figure(data=[go.Pie(
+        labels=["Transmitidas", "Não Transmitidas"],
+        values=[int(transmitidas), int(nao_transmitidas)],
+        hole=0.68,
+        marker=dict(
+            colors=["#2980b9", "#e67e22"],
+            line=dict(color="#ffffff", width=3),
+        ),
+        textinfo="none",
+        hovertemplate="<b>%{label}</b><br>%{value} empresa(s) — %{percent}<extra></extra>",
+        direction="clockwise",
+        sort=False,
+    )])
+
+    fig.update_layout(
+        paper_bgcolor="white", plot_bgcolor="white",
+        showlegend=False,
+        margin=dict(t=20, b=20, l=20, r=20),
+        height=300,
+        annotations=[dict(
+            text=f"<b>{total}</b><br><span style='font-size:11px'>empresas</span>",
+            x=0.5, y=0.5,
+            xanchor="center", yanchor="middle",
+            showarrow=False,
+            font=dict(size=22, color="#1d3f77"),
+        )],
+    )
+
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        key=f"chart_reinf_{st.session_state['reinf_chart_key']}",
+    )
+
+    col_l, col_r = st.columns(2)
+    with col_l:
+        st.markdown(
+            f"<div style='text-align:center; padding:8px; background:#eaf4fb; "
+            f"border-radius:8px; border-left:4px solid #2980b9;'>"
+            f"<span style='font-size:22px; font-weight:700; color:#2980b9;'>{transmitidas}</span><br>"
+            f"<span style='font-size:13px; color:#555;'>Transmitidas ({pct_t}%)</span></div>",
+            unsafe_allow_html=True,
+        )
+    with col_r:
+        st.markdown(
+            f"<div style='text-align:center; padding:8px; background:#fdf3e7; "
+            f"border-radius:8px; border-left:4px solid #e67e22;'>"
+            f"<span style='font-size:22px; font-weight:700; color:#e67e22;'>{nao_transmitidas}</span><br>"
+            f"<span style='font-size:13px; color:#555;'>Não Transmitidas ({pct_nt}%)</span></div>",
+            unsafe_allow_html=True,
+        )
+        if st.button("Ver empresas não transmitidas", use_container_width=True,
+                     key="btn_nao_transmitidas_reinf"):
+            df_nt = df_nao_filial[df_nao_filial[col_transm] == "Não Transmitida"]
+            _modal_reinf_nao_transmitidas(df_nt)
+
+    st.divider()
+
+    # ── tabela principal ──────────────────────────────────────────────────────
+    df_reinf = _sanitiza_df(df_reinf)
     exibe_aggrid(df_reinf, height=400, grid_key="grid_reinf")
-    
+
     output = BytesIO()
     df_reinf.to_excel(output, index=False)
-    st.download_button("Baixar Excel", data=output.getvalue(), file_name="reinf.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.download_button(
+        "Baixar Excel", data=output.getvalue(),
+        file_name="reinf.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 
 def pagina_dctf_web():
@@ -438,139 +736,776 @@ def pagina_dctf_web():
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
+@st.dialog("DMS — Sem Acesso")
+def _modal_dms_sem_acesso(df_show):
+    st.markdown(f"**{df_show.shape[0]} empresa(s) sem acesso**")
+    cols = [c for c in ["Código", "Razão Social", "CNPJ", "Município", "Estado", "DMS"]
+            if c in df_show.columns]
+    df_exib = df_show[cols].copy()
+    if "CNPJ" in df_exib.columns:
+        df_exib["CNPJ"] = df_exib["CNPJ"].apply(_normaliza_cnpj)
+    st.dataframe(df_exib.reset_index(drop=True),
+                 use_container_width=True, hide_index=True)
+
+
+@st.dialog("GUIA ISS DMS — Com Imposto")
+def _modal_dms_com_imposto(df_show):
+    st.markdown(f"**{df_show.shape[0]} empresa(s) com imposto**")
+    cols = [c for c in ["Código", "Razão Social", "CNPJ", "Município", "Estado",
+                        "DMS", "GUIA ISS DMS"]
+            if c in df_show.columns]
+    df_exib = df_show[cols].copy()
+    if "CNPJ" in df_exib.columns:
+        df_exib["CNPJ"] = df_exib["CNPJ"].apply(_normaliza_cnpj)
+    st.dataframe(df_exib.reset_index(drop=True),
+                 use_container_width=True, hide_index=True)
+
+
+@st.fragment
 def pagina_dms():
+    import plotly.graph_objects as go
     st.empty()
+
     df = le_planilha_google(GOOGLE_SHEET_URL, SHEET_EMPRESAS)
     if df is None:
         return
-    
-    competencia_raw = df.get("PERÍODO DE COMPETÊNCIA", [""])[0]
-    competencia = pd.to_datetime(competencia_raw, errors='coerce').strftime("%m/%Y") if competencia_raw else ""
-    
-    df_dms = df[df["Situação"].astype(str).str.upper() == "ATIVA"] if "Situação" in df.columns else pd.DataFrame()
+
+    competencia_raw = df["PERÍODO DE COMPETÊNCIA"].iloc[0] \
+        if "PERÍODO DE COMPETÊNCIA" in df.columns else ""
+    competencia = pd.to_datetime(competencia_raw, errors="coerce").strftime("%m/%Y") \
+        if competencia_raw else ""
+
+    if "Situação" not in df.columns:
+        st.error("Coluna 'Situação' não encontrada.")
+        return
+
+    df_dms = df[df["Situação"].astype(str).str.upper() == "ATIVA"].copy()
+
     if df_dms.empty:
         st.warning("Nenhuma empresa ATIVA encontrada para DMS.")
         return
-    
-    for col in ["FATURAMENTO SERVIÇOS", "BASE DE CÁLCULO ISS"]:
-        if col in df_dms.columns:
-            df_dms[col] = df_dms[col].fillna(0).astype(float).map(
-                lambda x: f"R$ {x:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-    
-    if "DMS" in df_dms.columns:
-        df_dms["DMS"] = df_dms["DMS"].fillna("")
-    
-    if "GUIA ISS DMS" not in df_dms.columns:
-        df_dms["GUIA ISS DMS"] = "Não"
-    else:
-        df_dms["GUIA ISS DMS"] = df_dms["GUIA ISS DMS"].astype(str).str.upper().replace({
-            "OK": "Guia salva", "NAN": "Não", "": "Não"})
-    
+
+    # ── colunas para exibição ─────────────────────────────────────────────────
     colunas = ["Código", "Razão Social", "CNPJ", "Regime", "Município", "Estado",
-               "FATURAMENTO SERVIÇOS", "BASE DE CÁLCULO ISS", "XML DMS", "DMS", "GUIA ISS DMS", "Situação"]
-    df_dms = df_dms[[c for c in colunas if c in df_dms.columns]]
-    
-    concluidas = df_dms[df_dms["DMS"].astype(str).str.upper() == "DMS SALVA"].shape[0]
-    sem_acesso = df_dms[df_dms["DMS"].astype(str).str.upper() == "SEM ACESSO"].shape[0]
-    nao_concluidas = df_dms[~df_dms["DMS"].astype(str).str.upper().isin(["DMS SALVA", "SEM ACESSO"])].shape[0]
-    
-    st.markdown(f"<h2>DMS</h2><p style='text-align:right; font-size:20px;'>"
-                f"<b>Concluídas:</b> {concluidas} | <b>Sem acesso:</b> {sem_acesso} | "
-                f"<b>Não concluídas:</b> {nao_concluidas} | <b>Competência:</b> {competencia}</p>", unsafe_allow_html=True)
-    
-    time.sleep(1)
+               "DMS", "GUIA ISS DMS", "Situação"]
+    df_dms = df_dms[[c for c in colunas if c in df_dms.columns]].copy()
+
+    # ── CNPJ: 14 dígitos ─────────────────────────────────────────────────────
+    if "CNPJ" in df_dms.columns:
+        df_dms["CNPJ"] = df_dms["CNPJ"].apply(_normaliza_cnpj)
+
+    # ── classificação DMS (coluna AC) ─────────────────────────────────────────
+    def _classifica_dms(val):
+        v = str(val).strip().upper() \
+            if pd.notna(val) and str(val).strip() not in ("", "NAN") else ""
+        if "SEM ACESSO" in v:
+            return "Sem Acesso"
+        return "Concluída"   # "Concluída" ou em branco
+
+    if "DMS" in df_dms.columns:
+        df_dms["DMS"] = df_dms["DMS"].apply(_classifica_dms)
+    else:
+        df_dms["DMS"] = "Concluída"
+
+    # ── classificação GUIA ISS DMS (coluna AD) ────────────────────────────────
+    def _classifica_guia(val):
+        v = str(val).strip().upper() \
+            if pd.notna(val) and str(val).strip() not in ("", "NAN") else ""
+        if v == "SIM":
+            return "Com Imposto"
+        return "Sem Imposto"
+
+    if "GUIA ISS DMS" in df_dms.columns:
+        df_dms["GUIA ISS DMS"] = df_dms["GUIA ISS DMS"].apply(_classifica_guia)
+    else:
+        df_dms["GUIA ISS DMS"] = "Sem Imposto"
+
+    # ── contagens DMS ─────────────────────────────────────────────────────────
+    concluidas  = (df_dms["DMS"] == "Concluída").sum()
+    sem_acesso  = (df_dms["DMS"] == "Sem Acesso").sum()
+    total_dms   = concluidas + sem_acesso
+
+    # ── contagens GUIA ISS ────────────────────────────────────────────────────
+    com_imposto  = (df_dms["GUIA ISS DMS"] == "Com Imposto").sum()
+    sem_imposto  = (df_dms["GUIA ISS DMS"] == "Sem Imposto").sum()
+    total_guia   = com_imposto + sem_imposto
+
+    st.markdown("<h2>DMS</h2>", unsafe_allow_html=True)
+    st.markdown(
+        f"<p style='text-align:right; font-size:20px;'>"
+        f"<b>Concluídas:</b> {concluidas} &nbsp;|&nbsp; "
+        f"<b>Sem Acesso:</b> {sem_acesso} &nbsp;|&nbsp; "
+        f"<b>Com Imposto:</b> {com_imposto} &nbsp;|&nbsp; "
+        f"<b>Sem Imposto:</b> {sem_imposto} &nbsp;|&nbsp; "
+        f"<b>Competência:</b> {competencia}</p>",
+        unsafe_allow_html=True,
+    )
+
+    # ── session keys ─────────────────────────────────────────────────────────
+    if "dms_chart_key" not in st.session_state:
+        st.session_state["dms_chart_key"] = 0
+    if "guia_chart_key" not in st.session_state:
+        st.session_state["guia_chart_key"] = 0
+
+    pct_c  = round(concluidas  / total_dms  * 100) if total_dms  else 0
+    pct_sa = round(sem_acesso  / total_dms  * 100) if total_dms  else 0
+    pct_ci = round(com_imposto / total_guia * 100) if total_guia else 0
+    pct_si = round(sem_imposto / total_guia * 100) if total_guia else 0
+
+    # ── dois donuts lado a lado ───────────────────────────────────────────────
+    col_d1, col_d2 = st.columns(2)
+
+    # ── donut 1: DMS ─────────────────────────────────────────────────────────
+    with col_d1:
+        st.markdown("<h4 style='text-align:center; color:#1d3f77;'>DMS</h4>",
+                    unsafe_allow_html=True)
+
+        fig1 = go.Figure(data=[go.Pie(
+            labels=["Concluídas", "Sem Acesso"],
+            values=[int(concluidas), int(sem_acesso)],
+            hole=0.68,
+            marker=dict(
+                colors=["#8e44ad", "#7f8c8d"],
+                line=dict(color="#ffffff", width=3),
+            ),
+            textinfo="none",
+            hovertemplate="<b>%{label}</b><br>%{value} empresa(s) — %{percent}<extra></extra>",
+            direction="clockwise",
+            sort=False,
+        )])
+        fig1.update_layout(
+            paper_bgcolor="white", plot_bgcolor="white",
+            showlegend=False,
+            margin=dict(t=10, b=10, l=10, r=10),
+            height=260,
+            annotations=[dict(
+                text=f"<b>{total_dms}</b><br><span style='font-size:11px'>empresas</span>",
+                x=0.5, y=0.5,
+                xanchor="center", yanchor="middle",
+                showarrow=False,
+                font=dict(size=20, color="#1d3f77"),
+            )],
+        )
+        st.plotly_chart(fig1, use_container_width=True,
+                        key=f"chart_dms_{st.session_state['dms_chart_key']}")
+
+        cl1, cl2 = st.columns(2)
+        with cl1:
+            st.markdown(
+                f"<div style='text-align:center; padding:8px; background:#f5eef8; "
+                f"border-radius:8px; border-left:4px solid #8e44ad;'>"
+                f"<span style='font-size:20px; font-weight:700; color:#8e44ad;'>{concluidas}</span><br>"
+                f"<span style='font-size:12px; color:#555;'>Concluídas ({pct_c}%)</span></div>",
+                unsafe_allow_html=True,
+            )
+        with cl2:
+            st.markdown(
+                f"<div style='text-align:center; padding:8px; background:#f2f3f4; "
+                f"border-radius:8px; border-left:4px solid #7f8c8d;'>"
+                f"<span style='font-size:20px; font-weight:700; color:#7f8c8d;'>{sem_acesso}</span><br>"
+                f"<span style='font-size:12px; color:#555;'>Sem Acesso ({pct_sa}%)</span></div>",
+                unsafe_allow_html=True,
+            )
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("Ver empresas sem acesso", use_container_width=True,
+                     key="btn_dms_sem_acesso"):
+            _modal_dms_sem_acesso(df_dms[df_dms["DMS"] == "Sem Acesso"])
+
+    # ── donut 2: GUIA ISS DMS ────────────────────────────────────────────────
+    with col_d2:
+        st.markdown("<h4 style='text-align:center; color:#1d3f77;'>Guia ISS DMS</h4>",
+                    unsafe_allow_html=True)
+
+        fig2 = go.Figure(data=[go.Pie(
+            labels=["Com Imposto", "Sem Imposto"],
+            values=[int(com_imposto), int(sem_imposto)],
+            hole=0.68,
+            marker=dict(
+                colors=["#16a085", "#bdc3c7"],
+                line=dict(color="#ffffff", width=3),
+            ),
+            textinfo="none",
+            hovertemplate="<b>%{label}</b><br>%{value} empresa(s) — %{percent}<extra></extra>",
+            direction="clockwise",
+            sort=False,
+        )])
+        fig2.update_layout(
+            paper_bgcolor="white", plot_bgcolor="white",
+            showlegend=False,
+            margin=dict(t=10, b=10, l=10, r=10),
+            height=260,
+            annotations=[dict(
+                text=f"<b>{total_guia}</b><br><span style='font-size:11px'>empresas</span>",
+                x=0.5, y=0.5,
+                xanchor="center", yanchor="middle",
+                showarrow=False,
+                font=dict(size=20, color="#1d3f77"),
+            )],
+        )
+        st.plotly_chart(fig2, use_container_width=True,
+                        key=f"chart_guia_{st.session_state['guia_chart_key']}")
+
+        cg1, cg2 = st.columns(2)
+        with cg1:
+            st.markdown(
+                f"<div style='text-align:center; padding:8px; background:#e8f8f5; "
+                f"border-radius:8px; border-left:4px solid #16a085;'>"
+                f"<span style='font-size:20px; font-weight:700; color:#16a085;'>{com_imposto}</span><br>"
+                f"<span style='font-size:12px; color:#555;'>Com Imposto ({pct_ci}%)</span></div>",
+                unsafe_allow_html=True,
+            )
+        with cg2:
+            st.markdown(
+                f"<div style='text-align:center; padding:8px; background:#f8f9f9; "
+                f"border-radius:8px; border-left:4px solid #bdc3c7;'>"
+                f"<span style='font-size:20px; font-weight:700; color:#7f8c8d;'>{sem_imposto}</span><br>"
+                f"<span style='font-size:12px; color:#555;'>Sem Imposto ({pct_si}%)</span></div>",
+                unsafe_allow_html=True,
+            )
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("Ver empresas com imposto", use_container_width=True,
+                     key="btn_guia_com_imposto"):
+            _modal_dms_com_imposto(df_dms[df_dms["GUIA ISS DMS"] == "Com Imposto"])
+
+    st.divider()
+
+    # ── tabela principal ──────────────────────────────────────────────────────
+    df_dms = _sanitiza_df(df_dms)
     exibe_aggrid(df_dms, height=400, grid_key="grid_dms")
-    
+
     output = BytesIO()
     df_dms.to_excel(output, index=False)
-    st.download_button("Baixar Excel", data=output.getvalue(), file_name="dms.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.download_button(
+        "Baixar Excel", data=output.getvalue(),
+        file_name="dms.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 
+@st.dialog("SERVIÇOS TOMADOS — Sem Acesso")
+def _modal_rest_sem_acesso(df_show):
+    st.markdown(f"**{df_show.shape[0]} empresa(s) sem acesso**")
+    cols = [c for c in ["Código", "Razão Social", "CNPJ", "Município", "Estado", "REST"]
+            if c in df_show.columns]
+    df_exib = df_show[cols].copy()
+    if "CNPJ" in df_exib.columns:
+        df_exib["CNPJ"] = df_exib["CNPJ"].apply(_normaliza_cnpj)
+    st.dataframe(df_exib.reset_index(drop=True),
+                 use_container_width=True, hide_index=True)
+
+
+@st.dialog("SERVIÇOS TOMADOS — Sem REST Prefeitura")
+def _modal_rest_sem_prefeitura(df_show):
+    st.markdown(f"**{df_show.shape[0]} empresa(s) sem REST Prefeitura**")
+    cols = [c for c in ["Código", "Razão Social", "CNPJ", "Município", "Estado", "REST"]
+            if c in df_show.columns]
+    df_exib = df_show[cols].copy()
+    if "CNPJ" in df_exib.columns:
+        df_exib["CNPJ"] = df_exib["CNPJ"].apply(_normaliza_cnpj)
+    st.dataframe(df_exib.reset_index(drop=True),
+                 use_container_width=True, hide_index=True)
+
+
+@st.dialog("GUIA ISS REST — Com Imposto")
+def _modal_rest_com_imposto(df_show):
+    st.markdown(f"**{df_show.shape[0]} empresa(s) com imposto**")
+    cols = [c for c in ["Código", "Razão Social", "CNPJ", "Município", "Estado",
+                        "REST", "GUIA ISS REST"]
+            if c in df_show.columns]
+    df_exib = df_show[cols].copy()
+    if "CNPJ" in df_exib.columns:
+        df_exib["CNPJ"] = df_exib["CNPJ"].apply(_normaliza_cnpj)
+    st.dataframe(df_exib.reset_index(drop=True),
+                 use_container_width=True, hide_index=True)
+
+
+@st.fragment
 def pagina_rest():
+    import plotly.graph_objects as go
     st.empty()
+
     df = le_planilha_google(GOOGLE_SHEET_URL, SHEET_EMPRESAS)
     if df is None:
         return
-    
-    competencia_raw = df.get("PERÍODO DE COMPETÊNCIA", [""])[0]
-    competencia = pd.to_datetime(competencia_raw, errors='coerce').strftime("%m/%Y") if competencia_raw else ""
-    
-    df_rest = df[df["Situação"].astype(str).str.upper() == "ATIVA"] if "Situação" in df.columns else pd.DataFrame()
+
+    competencia_raw = df["PERÍODO DE COMPETÊNCIA"].iloc[0] \
+        if "PERÍODO DE COMPETÊNCIA" in df.columns else ""
+    competencia = pd.to_datetime(competencia_raw, errors="coerce").strftime("%m/%Y") \
+        if competencia_raw else ""
+
+    if "Situação" not in df.columns:
+        st.error("Coluna 'Situação' não encontrada.")
+        return
+
+    df_rest = df[df["Situação"].astype(str).str.upper() == "ATIVA"].copy()
+
     if df_rest.empty:
         st.warning("Nenhuma empresa ATIVA encontrada para SERVIÇOS TOMADOS.")
         return
-    
-    for col in ["REST", "GUIA ISS REST"]:
-        if col in df_rest.columns:
-            df_rest[col] = df_rest[col].fillna("").astype(str)
-    
+
+    # ── colunas para exibição ─────────────────────────────────────────────────
+    colunas = ["Código", "Razão Social", "CNPJ", "Regime", "Município", "Estado",
+               "REST", "GUIA ISS REST", "Situação"]
+    df_rest = df_rest[[c for c in colunas if c in df_rest.columns]].copy()
+
+    # ── CNPJ: 14 dígitos ─────────────────────────────────────────────────────
+    if "CNPJ" in df_rest.columns:
+        df_rest["CNPJ"] = df_rest["CNPJ"].apply(_normaliza_cnpj)
+
+    # ── classificação REST (coluna AE) ────────────────────────────────────────
+    def _classifica_rest(val):
+        v = str(val).strip().upper() \
+            if pd.notna(val) and str(val).strip() not in ("", "NAN") else ""
+        if "SEM ACESSO" in v:
+            return "Sem Acesso"
+        if "SEM REST PREFEITURA" in v:
+            return "Sem REST Prefeitura"
+        return "Concluída"   # "Concluída" ou em branco
+
     if "REST" in df_rest.columns:
-        df_rest["REST"] = df_rest["REST"].replace({
-            "REST SALVA": "Concluído", "SEM ACESSO": "Sem acesso", "": "Não concluído"})
-    
-    colunas = ["Código", "Razão Social", "CNPJ", "REST", "XML REST", "GUIA ISS REST", "Situação"]
-    df_rest = df_rest[[c for c in colunas if c in df_rest.columns]]
-    
-    concluidas = df_rest[df_rest["REST"] == "Concluído"].shape[0]
-    sem_acesso = df_rest[df_rest["REST"] == "Sem acesso"].shape[0]
-    nao_concluidas = df_rest[df_rest["REST"] == "Não concluído"].shape[0]
-    
-    st.markdown(f"<h2>SERVIÇOS TOMADOS</h2><p style='text-align:right; font-size:20px;'>"
-                f"<b>Concluídas:</b> {concluidas} | <b>Sem acesso:</b> {sem_acesso} | "
-                f"<b>Não concluídas:</b> {nao_concluidas} | <b>Competência:</b> {competencia}</p>", unsafe_allow_html=True)
-    
-    time.sleep(1)
+        df_rest["REST"] = df_rest["REST"].apply(_classifica_rest)
+    else:
+        df_rest["REST"] = "Concluída"
+
+    # ── classificação GUIA ISS REST (coluna AG) ───────────────────────────────
+    def _classifica_guia_rest(val):
+        v = str(val).strip().upper() \
+            if pd.notna(val) and str(val).strip() not in ("", "NAN") else ""
+        if v == "SIM":
+            return "Com Imposto"
+        return "Sem Imposto"
+
+    if "GUIA ISS REST" in df_rest.columns:
+        df_rest["GUIA ISS REST"] = df_rest["GUIA ISS REST"].apply(_classifica_guia_rest)
+    else:
+        df_rest["GUIA ISS REST"] = "Sem Imposto"
+
+    # ── contagens REST ────────────────────────────────────────────────────────
+    concluidas       = (df_rest["REST"] == "Concluída").sum()
+    sem_acesso       = (df_rest["REST"] == "Sem Acesso").sum()
+    sem_prefeitura   = (df_rest["REST"] == "Sem REST Prefeitura").sum()
+    total_rest       = concluidas + sem_acesso + sem_prefeitura
+
+    # ── contagens GUIA ISS ────────────────────────────────────────────────────
+    com_imposto  = (df_rest["GUIA ISS REST"] == "Com Imposto").sum()
+    sem_imposto  = (df_rest["GUIA ISS REST"] == "Sem Imposto").sum()
+    total_guia   = com_imposto + sem_imposto
+
+    st.markdown("<h2>SERVIÇOS TOMADOS</h2>", unsafe_allow_html=True)
+    st.markdown(
+        f"<p style='text-align:right; font-size:20px;'>"
+        f"<b>Concluídas:</b> {concluidas} &nbsp;|&nbsp; "
+        f"<b>Sem Acesso:</b> {sem_acesso} &nbsp;|&nbsp; "
+        f"<b>Sem REST Prefeitura:</b> {sem_prefeitura} &nbsp;|&nbsp; "
+        f"<b>Com Imposto:</b> {com_imposto} &nbsp;|&nbsp; "
+        f"<b>Sem Imposto:</b> {sem_imposto} &nbsp;|&nbsp; "
+        f"<b>Competência:</b> {competencia}</p>",
+        unsafe_allow_html=True,
+    )
+
+    # ── session keys ──────────────────────────────────────────────────────────
+    if "rest_chart_key" not in st.session_state:
+        st.session_state["rest_chart_key"] = 0
+    if "guia_rest_chart_key" not in st.session_state:
+        st.session_state["guia_rest_chart_key"] = 0
+
+    pct_c   = round(concluidas     / total_rest  * 100) if total_rest  else 0
+    pct_sa  = round(sem_acesso     / total_rest  * 100) if total_rest  else 0
+    pct_sp  = round(sem_prefeitura / total_rest  * 100) if total_rest  else 0
+    pct_ci  = round(com_imposto    / total_guia  * 100) if total_guia  else 0
+    pct_si  = round(sem_imposto    / total_guia  * 100) if total_guia  else 0
+
+    # ── dois donuts lado a lado ───────────────────────────────────────────────
+    col_d1, col_d2 = st.columns(2)
+
+    # ── donut 1: REST ─────────────────────────────────────────────────────────
+    with col_d1:
+        st.markdown("<h4 style='text-align:center; color:#1d3f77;'>Serviços Tomados</h4>",
+                    unsafe_allow_html=True)
+
+        fig1 = go.Figure(data=[go.Pie(
+            labels=["Concluídas", "Sem Acesso", "Sem REST Prefeitura"],
+            values=[int(concluidas), int(sem_acesso), int(sem_prefeitura)],
+            hole=0.68,
+            marker=dict(
+                colors=["#d35400", "#7f8c8d", "#f0b429"],
+                line=dict(color="#ffffff", width=3),
+            ),
+            textinfo="none",
+            hovertemplate="<b>%{label}</b><br>%{value} empresa(s) — %{percent}<extra></extra>",
+            direction="clockwise",
+            sort=False,
+        )])
+        fig1.update_layout(
+            paper_bgcolor="white", plot_bgcolor="white",
+            showlegend=False,
+            margin=dict(t=10, b=10, l=10, r=10),
+            height=260,
+            annotations=[dict(
+                text=f"<b>{total_rest}</b><br><span style='font-size:11px'>empresas</span>",
+                x=0.5, y=0.5,
+                xanchor="center", yanchor="middle",
+                showarrow=False,
+                font=dict(size=20, color="#1d3f77"),
+            )],
+        )
+        st.plotly_chart(fig1, use_container_width=True,
+                        key=f"chart_rest_{st.session_state['rest_chart_key']}")
+
+        cl1, cl2, cl3 = st.columns(3)
+        with cl1:
+            st.markdown(
+                f"<div style='text-align:center; padding:8px; background:#fdf0e8; "
+                f"border-radius:8px; border-left:4px solid #d35400;'>"
+                f"<span style='font-size:18px; font-weight:700; color:#d35400;'>{concluidas}</span><br>"
+                f"<span style='font-size:11px; color:#555;'>Concluídas ({pct_c}%)</span></div>",
+                unsafe_allow_html=True,
+            )
+        with cl2:
+            st.markdown(
+                f"<div style='text-align:center; padding:8px; background:#f2f3f4; "
+                f"border-radius:8px; border-left:4px solid #7f8c8d;'>"
+                f"<span style='font-size:18px; font-weight:700; color:#7f8c8d;'>{sem_acesso}</span><br>"
+                f"<span style='font-size:11px; color:#555;'>Sem Acesso ({pct_sa}%)</span></div>",
+                unsafe_allow_html=True,
+            )
+        with cl3:
+            st.markdown(
+                f"<div style='text-align:center; padding:8px; background:#fefae8; "
+                f"border-radius:8px; border-left:4px solid #f0b429;'>"
+                f"<span style='font-size:18px; font-weight:700; color:#c79a00;'>{sem_prefeitura}</span><br>"
+                f"<span style='font-size:11px; color:#555;'>Sem Pref. ({pct_sp}%)</span></div>",
+                unsafe_allow_html=True,
+            )
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        cb1, cb2 = st.columns(2)
+        with cb1:
+            if st.button("Ver sem acesso", use_container_width=True,
+                         key="btn_rest_sem_acesso"):
+                _modal_rest_sem_acesso(df_rest[df_rest["REST"] == "Sem Acesso"])
+        with cb2:
+            if st.button("Ver sem REST Prefeitura", use_container_width=True,
+                         key="btn_rest_sem_prefeitura"):
+                _modal_rest_sem_prefeitura(df_rest[df_rest["REST"] == "Sem REST Prefeitura"])
+
+    # ── donut 2: GUIA ISS REST ────────────────────────────────────────────────
+    with col_d2:
+        st.markdown("<h4 style='text-align:center; color:#1d3f77;'>Guia ISS REST</h4>",
+                    unsafe_allow_html=True)
+
+        fig2 = go.Figure(data=[go.Pie(
+            labels=["Com Imposto", "Sem Imposto"],
+            values=[int(com_imposto), int(sem_imposto)],
+            hole=0.68,
+            marker=dict(
+                colors=["#1abc9c", "#bdc3c7"],
+                line=dict(color="#ffffff", width=3),
+            ),
+            textinfo="none",
+            hovertemplate="<b>%{label}</b><br>%{value} empresa(s) — %{percent}<extra></extra>",
+            direction="clockwise",
+            sort=False,
+        )])
+        fig2.update_layout(
+            paper_bgcolor="white", plot_bgcolor="white",
+            showlegend=False,
+            margin=dict(t=10, b=10, l=10, r=10),
+            height=260,
+            annotations=[dict(
+                text=f"<b>{total_guia}</b><br><span style='font-size:11px'>empresas</span>",
+                x=0.5, y=0.5,
+                xanchor="center", yanchor="middle",
+                showarrow=False,
+                font=dict(size=20, color="#1d3f77"),
+            )],
+        )
+        st.plotly_chart(fig2, use_container_width=True,
+                        key=f"chart_guia_rest_{st.session_state['guia_rest_chart_key']}")
+
+        cg1, cg2 = st.columns(2)
+        with cg1:
+            st.markdown(
+                f"<div style='text-align:center; padding:8px; background:#e8faf5; "
+                f"border-radius:8px; border-left:4px solid #1abc9c;'>"
+                f"<span style='font-size:20px; font-weight:700; color:#1abc9c;'>{com_imposto}</span><br>"
+                f"<span style='font-size:12px; color:#555;'>Com Imposto ({pct_ci}%)</span></div>",
+                unsafe_allow_html=True,
+            )
+        with cg2:
+            st.markdown(
+                f"<div style='text-align:center; padding:8px; background:#f8f9f9; "
+                f"border-radius:8px; border-left:4px solid #bdc3c7;'>"
+                f"<span style='font-size:20px; font-weight:700; color:#7f8c8d;'>{sem_imposto}</span><br>"
+                f"<span style='font-size:12px; color:#555;'>Sem Imposto ({pct_si}%)</span></div>",
+                unsafe_allow_html=True,
+            )
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("Ver empresas com imposto", use_container_width=True,
+                     key="btn_guia_rest_com_imposto"):
+            _modal_rest_com_imposto(df_rest[df_rest["GUIA ISS REST"] == "Com Imposto"])
+
+    st.divider()
+
+    # ── tabela principal ──────────────────────────────────────────────────────
+    df_rest = _sanitiza_df(df_rest)
     exibe_aggrid(df_rest, height=400, grid_key="grid_rest")
-    
+
     output = BytesIO()
     df_rest.to_excel(output, index=False)
-    st.download_button("Baixar Excel", data=output.getvalue(), file_name="servicos_tomados.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.download_button(
+        "Baixar Excel", data=output.getvalue(),
+        file_name="servicos_tomados.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 
+@st.dialog("SEFAZ — Sem Acesso")
+def _modal_sefaz_sem_acesso(df_show):
+    st.markdown(f"**{df_show.shape[0]} empresa(s) sem acesso**")
+    cols = [c for c in ["Código", "Razão Social", "CNPJ", "Estado", "Insc. Estadual", "IMPORTAÇÃO"]
+            if c in df_show.columns]
+    df_exib = df_show[cols].copy()
+    if "CNPJ" in df_exib.columns:
+        df_exib["CNPJ"] = df_exib["CNPJ"].apply(_normaliza_cnpj)
+    st.dataframe(df_exib.reset_index(drop=True),
+                 use_container_width=True, hide_index=True)
+
+
+@st.dialog("SEFAZ — Sem Busca")
+def _modal_sefaz_sem_busca(df_show):
+    st.markdown(f"**{df_show.shape[0]} empresa(s) sem busca**")
+    cols = [c for c in ["Código", "Razão Social", "CNPJ", "Estado", "Insc. Estadual", "IMPORTAÇÃO"]
+            if c in df_show.columns]
+    df_exib = df_show[cols].copy()
+    if "CNPJ" in df_exib.columns:
+        df_exib["CNPJ"] = df_exib["CNPJ"].apply(_normaliza_cnpj)
+    st.dataframe(df_exib.reset_index(drop=True),
+                 use_container_width=True, hide_index=True)
+
+
+@st.dialog("SEFAZ — Sem Movimento")
+def _modal_sefaz_sem_movimento(df_show):
+    st.markdown(f"**{df_show.shape[0]} empresa(s) sem movimento**")
+    cols = [c for c in ["Código", "Razão Social", "CNPJ", "Estado", "Insc. Estadual", "IMPORTAÇÃO"]
+            if c in df_show.columns]
+    df_exib = df_show[cols].copy()
+    if "CNPJ" in df_exib.columns:
+        df_exib["CNPJ"] = df_exib["CNPJ"].apply(_normaliza_cnpj)
+    st.dataframe(df_exib.reset_index(drop=True),
+                 use_container_width=True, hide_index=True)
+
+
+@st.fragment
 def pagina_sefaz():
+    import plotly.graph_objects as go
     st.empty()
+
     df = le_planilha_google(GOOGLE_SHEET_URL, SHEET_EMPRESAS)
     if df is None:
         return
-    
-    competencia_raw = df.get("PERÍODO DE COMPETÊNCIA", [""])[0]
-    competencia = pd.to_datetime(competencia_raw, errors='coerce').strftime("%m/%Y") if competencia_raw else ""
-    
-    df_sefaz = df[df["Situação"].astype(str).str.upper() == "ATIVA"] if "Situação" in df.columns else pd.DataFrame()
+
+    competencia_raw = df["PERÍODO DE COMPETÊNCIA"].iloc[0] \
+        if "PERÍODO DE COMPETÊNCIA" in df.columns else ""
+    competencia = pd.to_datetime(competencia_raw, errors="coerce").strftime("%m/%Y") \
+        if competencia_raw else ""
+
+    if "Situação" not in df.columns:
+        st.error("Coluna 'Situação' não encontrada.")
+        return
+
+    df_sefaz = df[df["Situação"].astype(str).str.upper() == "ATIVA"].copy()
+
     if df_sefaz.empty:
         st.warning("Nenhuma empresa ATIVA encontrada para SEFAZ.")
         return
-    
+
+    # ── colunas para exibição ─────────────────────────────────────────────────
     colunas = ["Código", "Razão Social", "CNPJ", "Estado", "Insc. Estadual",
-               "XML ENTRADA", "XML SAÍDA", "IMPORTAÇÃO", "TOTAL ENTRADA", "TOTAL SAÍDA", "TOTAL DOMÍNIO", "Situação"]
-    df_sefaz = df_sefaz[[c for c in colunas if c in df_sefaz.columns]]
-    
+               "XML ENTRADA", "XML SAÍDA", "IMPORTAÇÃO",
+               "TOTAL ENTRADA", "TOTAL SAÍDA", "TOTAL DOMÍNIO", "Situação"]
+    df_sefaz = df_sefaz[[c for c in colunas if c in df_sefaz.columns]].copy()
+
+    # ── CNPJ: 14 dígitos ─────────────────────────────────────────────────────
+    if "CNPJ" in df_sefaz.columns:
+        df_sefaz["CNPJ"] = df_sefaz["CNPJ"].apply(_normaliza_cnpj)
+
+    # ── colunas numéricas ─────────────────────────────────────────────────────
     for col in ["TOTAL ENTRADA", "TOTAL SAÍDA", "TOTAL DOMÍNIO"]:
         if col in df_sefaz.columns:
             df_sefaz[col] = pd.to_numeric(df_sefaz[col], errors="coerce").fillna(0)
-    
-    if "IMPORTAÇÃO" in df_sefaz.columns:
-        em_andamento = df_sefaz[df_sefaz["IMPORTAÇÃO"].astype(str).str.upper() == "EM ANDAMENTO"].shape[0]
-        outro_estado = df_sefaz[df_sefaz["IMPORTAÇÃO"].astype(str).str.upper() == "OUTRO ESTADO"].shape[0]
-        sem_movimento = df_sefaz[df_sefaz["IMPORTAÇÃO"].astype(str).str.upper() == "SEM MOVIMENTO"].shape[0]
-        concluido = df_sefaz[df_sefaz["IMPORTAÇÃO"].astype(str).str.upper() == "CONCLUÍDO"].shape[0]
+
+    # ── coluna Confronto ──────────────────────────────────────────────────────  ← NOVO
+    if all(c in df_sefaz.columns for c in ["XML ENTRADA", "XML SAÍDA", "TOTAL DOMÍNIO"]):
+        xml_entrada = pd.to_numeric(df_sefaz["XML ENTRADA"],   errors="coerce").fillna(0)
+        xml_saida   = pd.to_numeric(df_sefaz["XML SAÍDA"],     errors="coerce").fillna(0)
+        total_dom   = pd.to_numeric(df_sefaz["TOTAL DOMÍNIO"], errors="coerce").fillna(0)
+        soma_xml    = xml_entrada + xml_saida
+
+        def _confronto(idx):
+            s = soma_xml[idx]
+            d = total_dom[idx]
+            if s == 0 and d == 0:
+                return "Importação OK"
+            if s == d:
+                return "Importação OK"
+            return "Quantidade Diferente"
+
+        df_sefaz["Confronto"] = [_confronto(i) for i in df_sefaz.index]
     else:
-        em_andamento = outro_estado = sem_movimento = concluido = 0
-    
-    st.markdown(f"<h2>SEFAZ</h2><p style='text-align:right; font-size:20px;'>"
-                f"<b>Em andamento:</b> {em_andamento} | <b>Outro Estado:</b> {outro_estado} | "
-                f"<b>Sem movimento:</b> {sem_movimento} | <b>Concluído:</b> {concluido} | "
-                f"<b>Competência:</b> {competencia}</p>", unsafe_allow_html=True)
-    
-    time.sleep(1)
+        df_sefaz["Confronto"] = "Importação OK"
+
+    cols = [c for c in df_sefaz.columns if c not in ("Confronto", "Situação")]
+    cols_final = cols + ["Confronto"]
+    if "Situação" in df_sefaz.columns:
+        cols_final = cols + ["Confronto", "Situação"]
+    df_sefaz = df_sefaz[cols_final]
+
+    # ── classificação IMPORTAÇÃO (coluna BS) ──────────────────────────────────  ← CONTINUA IGUAL
+    def _classifica_sefaz(val):
+        v = str(val).strip().upper() \
+            if pd.notna(val) and str(val).strip() not in ("", "NAN") else ""
+        if "SEM ACESSO" in v:
+            return "Sem Acesso"
+        if "SEM BUSCA" in v:
+            return "Sem Busca"
+        if "SEM MOVIMENTO" in v:
+            return "Sem Movimento"
+        return "Com Movimento"   # COM MOVIMENTO ou qualquer outro valor
+
+    if "IMPORTAÇÃO" in df_sefaz.columns:
+        df_sefaz["IMPORTAÇÃO"] = df_sefaz["IMPORTAÇÃO"].apply(_classifica_sefaz)
+    else:
+        df_sefaz["IMPORTAÇÃO"] = "Com Movimento"
+
+    # ── contagens ─────────────────────────────────────────────────────────────
+    com_movimento  = (df_sefaz["IMPORTAÇÃO"] == "Com Movimento").sum()
+    sem_acesso     = (df_sefaz["IMPORTAÇÃO"] == "Sem Acesso").sum()
+    sem_busca      = (df_sefaz["IMPORTAÇÃO"] == "Sem Busca").sum()
+    sem_movimento  = (df_sefaz["IMPORTAÇÃO"] == "Sem Movimento").sum()
+    total          = com_movimento + sem_acesso + sem_busca + sem_movimento
+
+    st.markdown("<h2>SEFAZ</h2>", unsafe_allow_html=True)
+    st.markdown(
+        f"<p style='text-align:right; font-size:20px;'>"
+        f"<b>Com Movimento:</b> {com_movimento} &nbsp;|&nbsp; "
+        f"<b>Sem Acesso:</b> {sem_acesso} &nbsp;|&nbsp; "
+        f"<b>Sem Busca:</b> {sem_busca} &nbsp;|&nbsp; "
+        f"<b>Sem Movimento:</b> {sem_movimento} &nbsp;|&nbsp; "
+        f"<b>Competência:</b> {competencia}</p>",
+        unsafe_allow_html=True,
+    )
+
+    # ── session key ───────────────────────────────────────────────────────────
+    if "sefaz_chart_key" not in st.session_state:
+        st.session_state["sefaz_chart_key"] = 0
+
+    pct_cm = round(com_movimento / total * 100) if total else 0
+    pct_sa = round(sem_acesso    / total * 100) if total else 0
+    pct_sb = round(sem_busca     / total * 100) if total else 0
+    pct_sm = round(sem_movimento / total * 100) if total else 0
+
+    # ── donut centralizado ────────────────────────────────────────────────────
+    col_esq, col_centro, col_dir = st.columns([1, 2, 1])
+    with col_centro:
+        st.markdown("<h4 style='text-align:center; color:#1d3f77;'>Importação SEFAZ</h4>",
+                    unsafe_allow_html=True)
+
+        fig = go.Figure(data=[go.Pie(
+            labels=["Com Movimento", "Sem Acesso", "Sem Busca", "Sem Movimento"],
+            values=[int(com_movimento), int(sem_acesso),
+                    int(sem_busca),     int(sem_movimento)],
+            hole=0.68,
+            marker=dict(
+                colors=["#2471a3", "#c0392b", "#e67e22", "#7f8c8d"],
+                line=dict(color="#ffffff", width=3),
+            ),
+            textinfo="none",
+            hovertemplate="<b>%{label}</b><br>%{value} empresa(s) — %{percent}<extra></extra>",
+            direction="clockwise",
+            sort=False,
+        )])
+        fig.update_layout(
+            paper_bgcolor="white", plot_bgcolor="white",
+            showlegend=False,
+            margin=dict(t=10, b=10, l=10, r=10),
+            height=300,
+            annotations=[dict(
+                text=f"<b>{total}</b><br><span style='font-size:11px'>empresas</span>",
+                x=0.5, y=0.5,
+                xanchor="center", yanchor="middle",
+                showarrow=False,
+                font=dict(size=22, color="#1d3f77"),
+            )],
+        )
+        st.plotly_chart(fig, use_container_width=True,
+                        key=f"chart_sefaz_{st.session_state['sefaz_chart_key']}")
+
+    # ── cards com os 4 status ─────────────────────────────────────────────────
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.markdown(
+            f"<div style='text-align:center; padding:8px; background:#eaf4fb; "
+            f"border-radius:8px; border-left:4px solid #2471a3;'>"
+            f"<span style='font-size:20px; font-weight:700; color:#2471a3;'>{com_movimento}</span><br>"
+            f"<span style='font-size:12px; color:#555;'>Com Movimento ({pct_cm}%)</span></div>",
+            unsafe_allow_html=True,
+        )
+    with c2:
+        st.markdown(
+            f"<div style='text-align:center; padding:8px; background:#fdedec; "
+            f"border-radius:8px; border-left:4px solid #c0392b;'>"
+            f"<span style='font-size:20px; font-weight:700; color:#c0392b;'>{sem_acesso}</span><br>"
+            f"<span style='font-size:12px; color:#555;'>Sem Acesso ({pct_sa}%)</span></div>",
+            unsafe_allow_html=True,
+        )
+    with c3:
+        st.markdown(
+            f"<div style='text-align:center; padding:8px; background:#fdf3e7; "
+            f"border-radius:8px; border-left:4px solid #e67e22;'>"
+            f"<span style='font-size:20px; font-weight:700; color:#e67e22;'>{sem_busca}</span><br>"
+            f"<span style='font-size:12px; color:#555;'>Sem Busca ({pct_sb}%)</span></div>",
+            unsafe_allow_html=True,
+        )
+    with c4:
+        st.markdown(
+            f"<div style='text-align:center; padding:8px; background:#f2f3f4; "
+            f"border-radius:8px; border-left:4px solid #7f8c8d;'>"
+            f"<span style='font-size:20px; font-weight:700; color:#7f8c8d;'>{sem_movimento}</span><br>"
+            f"<span style='font-size:12px; color:#555;'>Sem Movimento ({pct_sm}%)</span></div>",
+            unsafe_allow_html=True,
+        )
+
+    # ── botões das listas ─────────────────────────────────────────────────────
+    st.markdown("<br>", unsafe_allow_html=True)
+    b1, b2, b3 = st.columns(3)
+    with b1:
+        if st.button("Ver sem acesso", use_container_width=True,
+                     key="btn_sefaz_sem_acesso"):
+            _modal_sefaz_sem_acesso(df_sefaz[df_sefaz["IMPORTAÇÃO"] == "Sem Acesso"])
+    with b2:
+        if st.button("Ver sem busca", use_container_width=True,
+                     key="btn_sefaz_sem_busca"):
+            _modal_sefaz_sem_busca(df_sefaz[df_sefaz["IMPORTAÇÃO"] == "Sem Busca"])
+    with b3:
+        if st.button("Ver sem movimento", use_container_width=True,
+                     key="btn_sefaz_sem_movimento"):
+            _modal_sefaz_sem_movimento(df_sefaz[df_sefaz["IMPORTAÇÃO"] == "Sem Movimento"])
+
+    st.divider()
+
+    # ── tabela principal ──────────────────────────────────────────────────────
+    df_sefaz = _sanitiza_df(df_sefaz)
     exibe_aggrid(df_sefaz, height=400, grid_key="grid_sefaz")
-    
+
     output = BytesIO()
     df_sefaz.to_excel(output, index=False)
-    st.download_button("Baixar Excel", data=output.getvalue(), file_name="sefaz.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.download_button(
+        "Baixar Excel", data=output.getvalue(),
+        file_name="sefaz.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 
 def pagina_cnd_municipal():
@@ -689,6 +1624,7 @@ def pagina_cnd_municipal():
         st.info("💡 Selecione uma linha na tabela para visualizar o PDF correspondente.")
         
         with st.container():
+            df_cnd = _sanitiza_df(df_cnd)
             grid_response = exibe_aggrid_com_oculta(df_cnd, height=400, grid_key="grid_cnd_municipal",
                                                      selection_mode='single',
                                                      colunas_ocultas=["Situação", "LINK CND MUNICIPAL"])
@@ -727,8 +1663,10 @@ def _estado_original(s):
 def _modal_dashboard(titulo, df_show, colunas):
     st.markdown(f"**{titulo}** — {df_show.shape[0]} empresa(s)")
     cols_ok = [c for c in colunas if c in df_show.columns]
-    st.dataframe(df_show[cols_ok].reset_index(drop=True),
-                 use_container_width=True, hide_index=True)
+    df_exib = df_show[cols_ok].reset_index(drop=True).copy()
+    if "CNPJ" in df_exib.columns:
+        df_exib["CNPJ"] = df_exib["CNPJ"].apply(_formata_cnpj_mascara)
+    st.dataframe(df_exib, use_container_width=True, hide_index=True)
 
 
 @st.fragment
@@ -770,16 +1708,20 @@ def pagina_dashboard_paralegal():
         df_est_count.columns = ["Estado_orig", "Quantidade"]
         df_est_count["Estado"] = df_est_count["Estado_orig"].apply(_formata_estado)
 
+        df_est_count["Qtd_display"] = df_est_count["Quantidade"].apply(
+            lambda x: max(x, df_est_count["Quantidade"].max() * 0.03)
+        )
+
         fig_est = px.bar(
-            df_est_count, x="Estado", y="Quantidade",
-            color="Quantidade",
+            df_est_count, x="Estado", y="Qtd_display",
+            color="Qtd_display",
             color_continuous_scale=[[0, "#4a90d9"], [1, "#1d3f77"]],
             text="Quantidade",
-            custom_data=["Estado_orig"],
+            custom_data=["Estado_orig", "Quantidade"],
         )
         fig_est.update_traces(
             textposition="outside",
-            hovertemplate="<b>%{customdata[0]}</b><br>Qtd: %{y}<extra></extra>",
+            hovertemplate="<b>%{customdata[0]}</b><br>Qtd: %{customdata[1]}<extra></extra>",
         )
         fig_est.update_layout(
             plot_bgcolor="white", paper_bgcolor="white",
@@ -789,6 +1731,8 @@ def pagina_dashboard_paralegal():
             margin=dict(t=30, b=20, l=10, r=10),
             height=350,
             clickmode="event+select",
+            bargap=0.1,
+            bargroupgap=0.0,
         )
 
         ev_est = st.plotly_chart(fig_est, use_container_width=True,
@@ -926,12 +1870,869 @@ def pagina_dashboard_paralegal():
     if modal_abrir:
         _modal_dashboard(*modal_abrir)
 
+
+COLUNAS_XML = [
+    "Número da Nota", "Data de Emissão", "Situação",
+    "Prestador Razão Social", "Prestador CNPJ/CPF",
+    "Tomador Razão Social", "Tomador CNPJ/CPF",
+    "Valor Serviço", "Base de Cálculo", "Valor ISS",
+    "PIS", "COFINS", "CSLL", "IRRF", "INSS", "ISS Retido",
+    "Federais Retidos", "Tipo Retenção Federal",
+    "CNAE", "Código LC", "Descrição LC", "Observações",
+]
+
+COFINS_LABEL = "*COFINS"  # ← AQUI
+COLS_IMPOSTO = ["PIS",  COFINS_LABEL, "CSLL", "IRRF", "INSS", "ISS Retido"]
+COLS_CODIGO  = ["CNAE", "Código LC", "Descrição LC"]
+
+
+import re
+from datetime import datetime as _dt
+
+def _corrige_codigo_lc(val):
+    """Converte qualquer formato de data/número para 00.00"""
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return ""
+    # Timestamp ou datetime
+    if isinstance(val, (pd.Timestamp, _dt)):
+        return f"{val.day:02d}.{val.month:02d}"
+    # String
+    s = str(val).strip()
+    if not s or s.upper() in ("NAN", "NAT", "NONE", ""):
+        return ""
+    # DD/MM/AAAA
+    m = re.match(r'^(\d{1,2})/(\d{1,2})/\d{2,4}$', s)
+    if m:
+        return f"{int(m.group(1)):02d}.{int(m.group(2)):02d}"
+    # já está no formato DD.MM
+    m2 = re.match(r'^(\d{1,2})\.(\d{1,2})$', s)
+    if m2:
+        return f"{int(m2.group(1)):02d}.{int(m2.group(2)):02d}"
+    # número decimal ex: 14.1  →  14.01
+    m3 = re.match(r'^(\d{1,2})\.(\d{1,2})(\d*)$', s)
+    if m3:
+        return f"{int(m3.group(1)):02d}.{int(m3.group(2)):02d}"
+    return s
+
+
+def _limpa_numero(val):
+    """Converte para float aceitando vírgula decimal e R$."""
+    if pd.isna(val):
+        return 0.0
+    s = str(val).strip().replace("R$", "").replace(" ", "")
+    # se tiver vírgula como decimal: 1.234,56 → 1234.56
+    if "," in s:
+        s = s.replace(".", "").replace(",", ".")
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
+
+
+@st.cache_data(ttl=600)
+def _carrega_xml_cache(sheet_name):
+    try:
+        resp = requests.get(GOOGLE_SHEET_URL)
+        resp.raise_for_status()
+        df = pd.read_excel(
+            BytesIO(resp.content),
+            sheet_name=sheet_name,
+            engine="openpyxl",
+            header=0,
+        )
+    except Exception as e:
+        return None, str(e)
+    df.columns = df.columns.str.strip()
+    n_cols = min(len(df.columns), len(COLUNAS_XML))
+    df = df.iloc[:, :n_cols].copy()
+    df.columns = COLUNAS_XML[:n_cols]
+    return df, None
+
+
+def _carrega_xml(sheet_name, col_cnpj_filtro):
+    df_geral = le_planilha_google(GOOGLE_SHEET_URL, SHEET_EMPRESAS)
+    if df_geral is None:
+        return None, None, None
+
+    df_ativos = df_geral[df_geral["Situação"].astype(str).str.upper() == "ATIVA"].copy()
+    df_ativos["_cnpj_norm"] = df_ativos["CNPJ"].apply(_normaliza_cnpj)
+    cnpjs_ativos = set(df_ativos["_cnpj_norm"])
+
+    # mapa CNPJ → Razão Social da planilha GERAL
+    mapa_razao = dict(zip(df_ativos["_cnpj_norm"], df_ativos["Razão Social"]))
+
+    df, erro = _carrega_xml_cache(sheet_name)
+    if df is None:
+        st.error(f"Erro ao ler aba '{sheet_name}': {erro}")
+        return None, None, None
+
+    df = df.copy()
+
+    # ── renomeia COFINS para evitar tradução do Chrome ────────────────────────
+    if "COFINS" in df.columns:
+        df = df.rename(columns={"COFINS": COFINS_LABEL})
+
+    # ── Código LC ─────────────────────────────────────────────────────────────
+    if "Código LC" in df.columns:
+        df["Código LC"] = df["Código LC"].apply(_corrige_codigo_lc)
+
+    # ── normaliza CNPJ e filtra ativos ────────────────────────────────────────
+    if col_cnpj_filtro in df.columns:
+        df[col_cnpj_filtro] = df[col_cnpj_filtro].apply(_normaliza_cnpj)
+        # para DMS o Prestador pode ter CPF (11 dígitos) — compara só os CNPJs (14 dígitos)
+        mask = df[col_cnpj_filtro].isin(cnpjs_ativos)
+        # se não encontrar nada com 14 dígitos, tenta com os dígitos que tiver
+        if mask.sum() == 0:
+            cnpjs_flexivel = set(c.lstrip("0") for c in cnpjs_ativos)
+            mask = df[col_cnpj_filtro].apply(
+                lambda x: x.lstrip("0") in cnpjs_flexivel
+            )
+        df = df[mask].copy()
+
+    # ── força string em colunas de CNPJ/CPF ──────────────────────────────────
+    for col in ["Prestador CNPJ/CPF", "Tomador CNPJ/CPF"]:
+        if col in df.columns:
+            df[col] = df[col].astype(str)        
+
+    # ── converte colunas monetárias para float ────────────────────────────────
+    COLS_MONETARIAS = [
+        "Valor Serviço", "Base de Cálculo", "Valor ISS",
+        "PIS", COFINS_LABEL, "CSLL", "IRRF", "INSS",
+        "Federais Retidos",
+    ]
+    for col in COLS_MONETARIAS:
+        if col in df.columns:
+            df[col] = df[col].apply(_limpa_numero)
+
+    # ISS Retido é texto — mantém como string limpa
+    if "ISS Retido" in df.columns:
+        df["ISS Retido"] = df["ISS Retido"].fillna("").astype(str).str.strip()
+
+    # ── formata data ──────────────────────────────────────────────────────────
+    if "Data de Emissão" in df.columns:
+        df["Data de Emissão"] = pd.to_datetime(
+            df["Data de Emissão"], errors="coerce"
+        ).dt.strftime("%d/%m/%Y").fillna("")
+
+    return df, cnpjs_ativos, mapa_razao
+
+
+def _filtros_xml(df, col_cnpj, mapa_razao, formata_cnpj=True, page_id="rest"):
+    """
+    col_cnpj     : coluna de CNPJ a filtrar (Tomador ou Prestador)
+    mapa_razao   : dict CNPJ_14digitos → Razão Social da planilha GERAL
+    formata_cnpj : True para Tomador (14 dígitos), False para Prestador (CPF misturado)
+    page_id      : "dms" ou "rest" — garante keys únicas e comportamento distinto
+    """
+    st.markdown("""
+    <div style='background:#f4f6fa; border-radius:10px; padding:16px 20px 8px 20px;
+                border:1px solid #dce3f0; margin-bottom:16px;'>
+    <span style='font-size:15px; font-weight:700; color:#1d3f77;'>Filtros</span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── empresa + situação ────────────────────────────────────────────────────
+    if col_cnpj in df.columns:
+        cnpjs_unicos = sorted(df[col_cnpj].dropna().astype(str).unique().tolist())
+        def _label(cnpj):
+            razao = mapa_razao.get(cnpj, "")
+            cnpj_fmt = cnpj.zfill(14) if formata_cnpj else cnpj
+            return f"{razao} — {cnpj_fmt}" if razao else cnpj_fmt
+        opcoes_emp = ["Todas as empresas"] + [_label(c) for c in cnpjs_unicos]
+        mapa_label_cnpj = {"Todas as empresas": None}
+        for c in cnpjs_unicos:
+            mapa_label_cnpj[_label(c)] = c
+    else:
+        opcoes_emp = ["Todas as empresas"]
+        mapa_label_cnpj = {"Todas as empresas": None}
+
+    fc1, fc2 = st.columns([3, 1])
+    with fc1:
+        sel_emp = st.selectbox(
+            "Empresa",
+            options=opcoes_emp,
+            key=f"filtro_emp_{page_id}",
+        )
+    with fc2:
+        sel_sit = st.selectbox(
+            "Situação da nota",
+            options=["Todas", "Autorizada", "Cancelada"],
+            key=f"filtro_sit_{page_id}",
+        )
+
+    # ── impostos ──────────────────────────────────────────────────────────────
+    st.markdown(
+        "<p style='font-size:13px; color:#555; margin:8px 0 4px;'>"
+        "<b>Exibir apenas notas com valor &gt; 0 em:</b></p>",
+        unsafe_allow_html=True,
+    )
+    fi_cols = st.columns(len(COLS_IMPOSTO))
+    filtros_imposto = {}
+    for i, col in enumerate(COLS_IMPOSTO):
+        with fi_cols[i]:
+            if col == "ISS Retido":
+                label_exib = "ISS próprio" if page_id == "dms" else "ISS Retido"
+            else:
+                label_exib = col if col.strip() else "—"
+            tem = col in df.columns
+            filtros_imposto[col] = st.checkbox(
+                label_exib,
+                key=f"imp_{col}_{page_id}",
+                disabled=not tem,
+            )
+
+    # ── códigos ───────────────────────────────────────────────────────────────
+    st.markdown(
+        "<p style='font-size:13px; color:#555; margin:8px 0 4px;'>"
+        "<b>Filtrar por código:</b></p>",
+        unsafe_allow_html=True,
+    )
+    fk1, fk2, fk3 = st.columns(3)
+    filtros_codigo = {}
+    for col, fc in zip(COLS_CODIGO, [fk1, fk2, fk3]):
+        with fc:
+            opcoes = sorted(
+                df[col].dropna().astype(str)
+                .replace("", pd.NA).dropna().unique().tolist()
+            ) if col in df.columns else []
+            filtros_codigo[col] = st.multiselect(
+                col if col.strip() else "—",
+                options=opcoes,
+                placeholder="Todos...",
+                key=f"cod_{col}_{page_id}",
+            )
+
+    # ── aplica filtros ────────────────────────────────────────────────────────
+    df_f = df.copy()
+
+    cnpj_sel = mapa_label_cnpj.get(sel_emp)
+    if cnpj_sel and col_cnpj in df_f.columns:
+        df_f = df_f[df_f[col_cnpj].astype(str) == cnpj_sel]
+
+    if sel_sit != "Todas" and "Situação" in df_f.columns:
+        df_f = df_f[df_f["Situação"].astype(str).str.strip().str.upper()
+                    == sel_sit.upper()]
+
+    for col, ativo in filtros_imposto.items():
+        if not ativo or col not in df_f.columns:
+            continue
+        if col == "ISS Retido":
+            if page_id == "dms":
+                df_f = df_f[df_f[col].astype(str).str.strip().str.upper() == "NÃO"]
+            else:
+                df_f = df_f[df_f[col].astype(str).str.strip().str.upper() == "SIM"]
+        else:
+            df_f = df_f[pd.to_numeric(df_f[col], errors="coerce").fillna(0) > 0]
+
+    for col, selecionados in filtros_codigo.items():
+        if selecionados and col in df_f.columns:
+            df_f = df_f[df_f[col].astype(str).isin(selecionados)]
+
+    return df_f
+
+
+COLS_TOTALIZADOR = [
+    "Valor Serviço", "Base de Cálculo", "Valor ISS",
+    "PIS",  COFINS_LABEL, "CSLL", "IRRF", "INSS",
+]
+
+CORES_TOTAL = [
+    "#1d3f77", "#2471a3", "#148f77",
+    "#1e8449", "#b7950b", "#784212", "#922b21", "#6c3483",
+]
+
+def _exibe_totalizador(df):
+    colunas_presentes = [c for c in COLS_TOTALIZADOR if c in df.columns]
+    if not colunas_presentes:
+        return
+
+    st.markdown(
+        "<p style='font-size:13px; font-weight:700; color:#1d3f77; "
+        "margin:12px 0 6px;'>Totais do filtro atual:</p>",
+        unsafe_allow_html=True,
+    )
+
+    cols_ui = st.columns(len(colunas_presentes))
+    for i, col in enumerate(colunas_presentes):
+        cor = CORES_TOTAL[COLS_TOTALIZADOR.index(col)]
+        nome_exib = "COFINS" if col == COFINS_LABEL else col
+
+        total = pd.to_numeric(df[col], errors="coerce").fillna(0).sum()
+        valor_fmt = (
+            f"R$ {total:,.2f}"
+            .replace(",", "X").replace(".", ",").replace("X", ".")
+        )
+
+        with cols_ui[i]:
+            st.markdown(
+                f"<div translate='no' style='text-align:center; padding:8px 4px; "
+                f"background:{cor}; border-radius:8px;'>"
+                f"<span style='font-size:11px; color:rgba(255,255,255,0.8);'>"
+                f"{nome_exib}</span><br>"
+                f"<span style='font-size:14px; font-weight:700; color:#ffffff;'>"
+                f"{valor_fmt}</span></div>",
+                unsafe_allow_html=True,
+            )
+
+def _exibe_grid_xml(df, grid_key):
+    import hashlib
+    hash_key = hashlib.md5(str(df.shape).encode() + str(df.index.tolist()).encode()).hexdigest()[:8]
+
+    gb = GridOptionsBuilder.from_dataframe(df)
+    gb.configure_default_column(
+        resizable=True, filter=True, sortable=True,
+        minWidth=120, width=150,
+    )
+
+    colunas_fixas = ["Número da Nota", "Data de Emissão",
+                     "Prestador Razão Social", "Prestador CNPJ/CPF",
+                     "Tomador Razão Social", "Tomador CNPJ/CPF"]
+    for col in colunas_fixas[:4]:
+        if col in df.columns:
+            gb.configure_column(col, pinned="left", width=160)
+
+    gb.configure_grid_options(
+        domLayout="normal",
+        suppressHorizontalScroll=False,
+        enableRangeSelection=True,
+        suppressColumnVirtualisation=True,
+        alwaysShowHorizontalScroll=True, 
+    )
+
+    AgGrid(
+        df,
+        gridOptions=gb.build(),
+        height=500,
+        key=f"{grid_key}_{hash_key}",
+        fit_columns_on_grid_load=False,
+        enable_enterprise_modules=False,
+        update_mode=GridUpdateMode.NO_UPDATE,
+        allow_unsafe_jscode=True,
+    )
+
+
+def pagina_leitura_xml_dms():
+    st.empty()
+    st.markdown("<h2>LEITURA XML DMS</h2>", unsafe_allow_html=True)
+
+    col_cnpj = "Prestador CNPJ/CPF"
+
+    df, _, mapa_razao = _carrega_xml(SHEET_XML_DMS, col_cnpj)
+    if df is None:
+        return
+
+
+    total_empresas = df[col_cnpj].nunique() if col_cnpj in df.columns else 0
+    total_notas    = len(df)
+    st.markdown(
+        f"<p style='font-size:18px;'>"
+        f"<b>Empresas ativas com notas:</b> {total_empresas} &nbsp;|&nbsp; "
+        f"<b>Total de notas:</b> {total_notas}</p>",
+        unsafe_allow_html=True,
+    )
+
+    df_filtrado = _filtros_xml(df, col_cnpj, mapa_razao, formata_cnpj=False, page_id="dms")
+
+
+    st.markdown(
+        f"<p style='font-size:14px; color:#555;'>Exibindo <b>{len(df_filtrado)}</b> "
+        f"nota(s) de <b>{df_filtrado[col_cnpj].nunique()}</b> empresa(s)</p>",
+        unsafe_allow_html=True,
+    )
+
+    _exibe_totalizador(df_filtrado)
+
+    df_filtrado = _sanitiza_df(df_filtrado)
+    _exibe_grid_xml(df_filtrado, "grid_xml_dms")
+
+    output = BytesIO()
+    df_filtrado.to_excel(output, index=False)
+    st.download_button("Baixar Excel", data=output.getvalue(),
+                       file_name="leitura_xml_dms.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+def pagina_leitura_xml_rest():
+    st.empty()
+    st.markdown("<h2>LEITURA XML REST</h2>", unsafe_allow_html=True)
+
+    col_cnpj = "Tomador CNPJ/CPF"
+
+    df, _, mapa_razao = _carrega_xml(SHEET_XML_REST, col_cnpj)
+    if df is None:
+        return
+
+    total_empresas = df[col_cnpj].nunique() if col_cnpj in df.columns else 0
+    total_notas    = len(df)
+    st.markdown(
+        f"<p style='font-size:18px;'>"
+        f"<b>Empresas ativas com notas:</b> {total_empresas} &nbsp;|&nbsp; "
+        f"<b>Total de notas:</b> {total_notas}</p>",
+        unsafe_allow_html=True,
+    )
+
+    df_filtrado = _filtros_xml(df, col_cnpj, mapa_razao, formata_cnpj=True, page_id="rest")
+
+    st.markdown(
+        f"<p style='font-size:14px; color:#555;'>Exibindo <b>{len(df_filtrado)}</b> "
+        f"nota(s) de <b>{df_filtrado[col_cnpj].nunique()}</b> empresa(s)</p>",
+        unsafe_allow_html=True,
+    )
+
+    _exibe_totalizador(df_filtrado)
+
+    df_filtrado = _sanitiza_df(df_filtrado)
+    _exibe_grid_xml(df_filtrado, "grid_xml_rest")
+
+    output = BytesIO()
+    df_filtrado.to_excel(output, index=False)
+    st.download_button("Baixar Excel", data=output.getvalue(),
+                       file_name="leitura_xml_rest.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+def _sanitiza_df(df):
+    """Converte todas as colunas para string — evita erro Arrow."""
+    df = df.copy()
+    for col in df.columns:
+        df[col] = df[col].astype(str).replace("nan", "").replace("None", "")
+    return df                
+
+@st.dialog("Prefeitura — DMS Sem Acesso")
+def _modal_sem_acesso_dms(df_show):
+    st.markdown(f"**{df_show.shape[0]} empresa(s)**")
+    st.dataframe(df_show.reset_index(drop=True), use_container_width=True, hide_index=True)
+
+@st.dialog("SEFAZ — Sem Acesso")
+def _modal_sem_acesso_sefaz(df_show):
+    st.markdown(f"**{df_show.shape[0]} empresa(s)**")
+    st.dataframe(df_show.reset_index(drop=True), use_container_width=True, hide_index=True)
+
+@st.dialog("eCAC — Sem Procuração")
+def _modal_sem_acesso_ecac(df_show):
+    st.markdown(f"**{df_show.shape[0]} empresa(s)**")
+    st.dataframe(df_show.reset_index(drop=True), use_container_width=True, hide_index=True)
+
+
+@st.fragment
+def pagina_sem_acesso():
+    import plotly.graph_objects as go
+    st.empty()
+
+    df = le_planilha_google(GOOGLE_SHEET_URL, SHEET_EMPRESAS)
+    if df is None:
+        return
+
+    df_ativas = df[df["Situação"].astype(str).str.upper() == "ATIVA"].copy()
+    if df_ativas.empty:
+        st.warning("Nenhuma empresa ATIVA encontrada.")
+        return
+
+    # ── colunas base para exibição ────────────────────────────────────────────
+    COLS_BASE = ["Código", "Razão Social", "CNPJ"]
+
+    def _prepara(df_fil):
+        cols = [c for c in COLS_BASE if c in df_fil.columns]
+        d = df_fil[cols].copy()
+        if "CNPJ" in d.columns:
+            d["CNPJ"] = d["CNPJ"].apply(_formata_cnpj_mascara)
+        return d.reset_index(drop=True)
+
+    # ── PREFEITURA — DMS ──────────────────────────────────────────────────────
+    col_dms = "DMS"
+    if col_dms in df_ativas.columns:
+        mask_dms = df_ativas[col_dms].astype(str).str.upper().str.contains("SEM ACESSO", na=False)
+        df_dms_sa = _prepara(df_ativas[mask_dms])
+    else:
+        df_dms_sa = pd.DataFrame(columns=COLS_BASE)
+
+    # ── SEFAZ ─────────────────────────────────────────────────────────────────
+    col_sefaz = "IMPORTAÇÃO"
+    if col_sefaz in df_ativas.columns:
+        mask_sefaz = df_ativas[col_sefaz].astype(str).str.upper().str.contains("SEM ACESSO", na=False)
+        df_sefaz_sa = _prepara(df_ativas[mask_sefaz])
+    else:
+        df_sefaz_sa = pd.DataFrame(columns=COLS_BASE)
+
+    # ── eCAC — SIMPLES, REINF, DCTF WEB ──────────────────────────────────────
+    ecac_masks = []
+    for col in ["MOTIVO SITUAÇÃO DO DAS", "MOTIVO SITUAÇÃO REINF", "MOTIVO SITUAÇÃO DCTF WEB"]:
+        if col in df_ativas.columns:
+            ecac_masks.append(
+                df_ativas[col].astype(str).str.upper().str.contains("PROCURA", na=False)
+            )
+
+    if ecac_masks:
+        mask_ecac = ecac_masks[0]
+        for m in ecac_masks[1:]:
+            mask_ecac = mask_ecac | m
+        df_ecac_sa = _prepara(df_ativas[mask_ecac])
+    else:
+        df_ecac_sa = pd.DataFrame(columns=COLS_BASE)
+
+    # ── cabeçalho ─────────────────────────────────────────────────────────────
+    st.markdown("<h2>SEM ACESSO</h2>", unsafe_allow_html=True)
+    st.markdown(
+        f"<p style='text-align:right; font-size:18px;'>"
+        f"<b>Prefeitura:</b> {len(df_dms_sa)} &nbsp;|&nbsp; "
+        f"<b>SEFAZ:</b> {len(df_sefaz_sa)} &nbsp;|&nbsp; "
+        f"<b>eCAC:</b> {len(df_ecac_sa)}</p>",
+        unsafe_allow_html=True,
+    )
+
+    # ── session keys ──────────────────────────────────────────────────────────
+    for k in ["sa_chart_key"]:
+        if k not in st.session_state:
+            st.session_state[k] = 0
+
+    # ── três donuts lado a lado ───────────────────────────────────────────────
+    total_geral = len(df_ativas)
+    col1, col2, col3 = st.columns(3)
+
+    def _donut(titulo, qtd_sa, total, cor_sa, cor_ok):
+        qtd_ok = max(total - qtd_sa, 0)
+        fig = go.Figure(data=[go.Pie(
+            labels=["Sem Acesso", "Com Acesso"],
+            values=[int(qtd_sa), int(qtd_ok)],
+            hole=0.68,
+            marker=dict(colors=[cor_sa, cor_ok], line=dict(color="#ffffff", width=3)),
+            textinfo="none",
+            hovertemplate="<b>%{label}</b><br>%{value} empresa(s)<extra></extra>",
+            direction="clockwise",
+            sort=False,
+        )])
+        fig.update_layout(
+            paper_bgcolor="white", plot_bgcolor="white",
+            showlegend=False,
+            margin=dict(t=10, b=10, l=10, r=10),
+            height=220,
+            annotations=[dict(
+                text=f"<b>{qtd_sa}</b><br><span style='font-size:10px'>sem acesso</span>",
+                x=0.5, y=0.5, xanchor="center", yanchor="middle",
+                showarrow=False,
+                font=dict(size=18, color="#1d3f77"),
+            )],
+        )
+        return fig
+
+    with col1:
+        st.markdown("<h4 style='text-align:center; color:#1d3f77;'>Prefeitura</h4>",
+                    unsafe_allow_html=True)
+        st.plotly_chart(_donut("Prefeitura", len(df_dms_sa), total_geral,
+                               "#c0392b", "#bdc3c7"),
+                        use_container_width=True,
+                        key=f"chart_sa_dms_{st.session_state['sa_chart_key']}")
+        pct = round(len(df_dms_sa) / total_geral * 100) if total_geral else 0
+        st.markdown(
+            f"<div style='text-align:center; padding:8px; background:#fdedec; "
+            f"border-radius:8px; border-left:4px solid #c0392b;'>"
+            f"<span style='font-size:20px; font-weight:700; color:#c0392b;'>{len(df_dms_sa)}</span><br>"
+            f"<span style='font-size:12px; color:#555;'>DMS Sem Acesso ({pct}%)</span></div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("Ver empresas", key="btn_sa_dms", use_container_width=True):
+            _modal_sem_acesso_dms(df_dms_sa)
+
+    with col2:
+        st.markdown("<h4 style='text-align:center; color:#1d3f77;'>SEFAZ</h4>",
+                    unsafe_allow_html=True)
+        st.plotly_chart(_donut("SEFAZ", len(df_sefaz_sa), total_geral,
+                               "#e67e22", "#bdc3c7"),
+                        use_container_width=True,
+                        key=f"chart_sa_sefaz_{st.session_state['sa_chart_key']}")
+        pct = round(len(df_sefaz_sa) / total_geral * 100) if total_geral else 0
+        st.markdown(
+            f"<div style='text-align:center; padding:8px; background:#fdf3e7; "
+            f"border-radius:8px; border-left:4px solid #e67e22;'>"
+            f"<span style='font-size:20px; font-weight:700; color:#e67e22;'>{len(df_sefaz_sa)}</span><br>"
+            f"<span style='font-size:12px; color:#555;'>SEFAZ Sem Acesso ({pct}%)</span></div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("Ver empresas", key="btn_sa_sefaz", use_container_width=True):
+            _modal_sem_acesso_sefaz(df_sefaz_sa)
+
+    with col3:
+        st.markdown("<h4 style='text-align:center; color:#1d3f77;'>eCAC</h4>",
+                    unsafe_allow_html=True)
+        st.plotly_chart(_donut("eCAC", len(df_ecac_sa), total_geral,
+                               "#8e44ad", "#bdc3c7"),
+                        use_container_width=True,
+                        key=f"chart_sa_ecac_{st.session_state['sa_chart_key']}")
+        pct = round(len(df_ecac_sa) / total_geral * 100) if total_geral else 0
+        st.markdown(
+            f"<div style='text-align:center; padding:8px; background:#f5eef8; "
+            f"border-radius:8px; border-left:4px solid #8e44ad;'>"
+            f"<span style='font-size:20px; font-weight:700; color:#8e44ad;'>{len(df_ecac_sa)}</span><br>"
+            f"<span style='font-size:12px; color:#555;'>eCAC Sem Procuração ({pct}%)</span></div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("Ver empresas", key="btn_sa_ecac", use_container_width=True):
+            _modal_sem_acesso_ecac(df_ecac_sa)
+
+    st.divider()
+
+    # ── lista geral ───────────────────────────────────────────────────────────
+    st.markdown("### Lista Geral — Todas as pendências", unsafe_allow_html=True)
+
+    df_dms_sa["Origem"] = "DMS — Prefeitura"
+    df_sefaz_sa["Origem"] = "SEFAZ"
+    df_ecac_sa["Origem"] = "eCAC"
+
+    df_geral_sa = pd.concat([df_dms_sa, df_sefaz_sa, df_ecac_sa], ignore_index=True)
+
+    if not df_geral_sa.empty:
+        df_geral_sa = _sanitiza_df(df_geral_sa)
+        exibe_aggrid(df_geral_sa, height=400, grid_key="grid_sem_acesso")
+
+        output = BytesIO()
+        df_geral_sa.to_excel(output, index=False)
+        st.download_button(
+            "Baixar Excel", data=output.getvalue(),
+            file_name="sem_acesso.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    else:
+        st.success("Nenhuma pendência encontrada!")
+
+
+@st.dialog("SEFAZ COMPARAÇÃO — Divergências")
+def _modal_sefaz_comparacao(df_show):
+    st.markdown(f"**{df_show.shape[0]} empresa(s) com divergência**")
+    st.dataframe(df_show.reset_index(drop=True), use_container_width=True, hide_index=True)
+
+
+@st.fragment
+def pagina_sefaz_comparacao():
+    import plotly.graph_objects as go
+    st.empty()
+
+    # ── carrega aba SEFAZ ─────────────────────────────────────────────────────
+    try:
+        resp = requests.get(GOOGLE_SHEET_URL)
+        resp.raise_for_status()
+        df_sefaz = pd.read_excel(
+            BytesIO(resp.content),
+            sheet_name=SHEET_SEFAZ,
+            engine="openpyxl",
+            header=0,
+        )
+    except Exception as e:
+        st.error(f"Erro ao ler aba SEFAZ: {e}")
+        return
+
+    df_sefaz.columns = df_sefaz.columns.str.strip()
+
+    # ── carrega aba GERAL para pegar Nome e CNPJ ──────────────────────────────
+    df_geral = le_planilha_google(GOOGLE_SHEET_URL, SHEET_EMPRESAS)
+    if df_geral is None:
+        return
+
+    df_geral = df_geral.copy()
+    if "CNPJ" in df_geral.columns:
+        df_geral["CNPJ_fmt"] = df_geral["CNPJ"].apply(_formata_cnpj_mascara)
+    if "Código" in df_geral.columns:
+        df_geral["Código"] = df_geral["Código"].astype(str).str.strip()
+
+    mapa_empresa = {}
+    for _, row in df_geral.iterrows():
+        cod = str(row.get("Código", "")).strip()
+        if cod:
+            mapa_empresa[cod] = {
+                "Razão Social": row.get("Razão Social", ""),
+                "CNPJ": row.get("CNPJ_fmt", ""),
+                "Insc. Estadual":  row.get("Insc. Estadual", ""),
+            }
+
+    # ── identifica colunas por posição ───────────────────────────────────────
+    # A=0, D=3, T=19, W=22
+    cols = df_sefaz.columns.tolist()
+
+    def _col(idx):
+        return cols[idx] if idx < len(cols) else None
+
+    nome_cod_a  = _col(0)   # A — CÓDIGO
+    nome_said_d = _col(3)   # D — SAÍDAS
+    nome_cod_t  = _col(19)  # T — CÓDIGO
+    nome_said_w = _col(22)  # W — SAÍDAS
+
+    if not all([nome_cod_a, nome_said_d, nome_cod_t, nome_said_w]):
+        st.error("Colunas A, D, T ou W não encontradas na aba SEFAZ.")
+        return
+
+    # ── normaliza e converte ──────────────────────────────────────────────────
+    # ── normaliza códigos — remove .0 ────────────────────────────────────────
+    def _limpa_codigo(val):
+        s = str(val).strip()
+        if s.endswith(".0"):
+            s = s[:-2]
+        return s.upper().replace("NAN", "").strip()
+
+    df_sefaz[nome_cod_a] = df_sefaz[nome_cod_a].apply(_limpa_codigo)
+    df_sefaz[nome_cod_t] = df_sefaz[nome_cod_t].apply(_limpa_codigo)
+    df_sefaz[nome_said_d] = df_sefaz[nome_said_d].apply(_limpa_numero)
+    df_sefaz[nome_said_w] = df_sefaz[nome_said_w].apply(_limpa_numero)
+
+    # ── filtra linhas válidas de cada lado ────────────────────────────────────
+    df_lado_a = df_sefaz[df_sefaz[nome_cod_a] != ""][
+        [nome_cod_a, nome_said_d]
+    ].copy()
+    df_lado_a.columns = ["Código", "Saídas_A"]
+
+    df_lado_t = df_sefaz[df_sefaz[nome_cod_t] != ""][
+        [nome_cod_t, nome_said_w]
+    ].copy()
+    df_lado_t.columns = ["Código", "Saídas_T"]
+
+    # ── agrupa por código (soma caso haja duplicatas) ─────────────────────────
+    df_lado_a = df_lado_a.groupby("Código", as_index=False)["Saídas_A"].sum()
+    df_lado_t = df_lado_t.groupby("Código", as_index=False)["Saídas_T"].sum()
+
+    # ── junta pelos códigos ───────────────────────────────────────────────────
+    df_merge = pd.merge(df_lado_a, df_lado_t, on="Código", how="outer").fillna(0)
+
+    # ── compara ───────────────────────────────────────────────────────────────
+    df_merge["Diferença"] = df_merge["Saídas_A"] - df_merge["Saídas_T"]
+    df_dif  = df_merge[df_merge["Diferença"] != 0].copy()
+    df_ok   = df_merge[df_merge["Diferença"] == 0].copy()
+
+    # ── monta df de exibição com Nome e CNPJ da GERAL ─────────────────────────
+    def _enriquece(df_in):
+        rows = []
+        for _, row in df_in.iterrows():
+            cod = str(row["Código"]).strip()
+            emp = mapa_empresa.get(cod, {})
+
+            def _fmt_valor(v):
+                try:
+                    f = float(v)
+                    if f == int(f):
+                        return int(f)
+                    return round(f, 2)
+                except:
+                    return v
+
+            rows.append({
+                "Código":          cod,
+                "Razão Social":    emp.get("Razão Social", ""),
+                "CNPJ":            emp.get("CNPJ", ""),
+                "Insc. Estadual":  emp.get("Insc. Estadual", ""),
+                "Saídas Inicial":  _fmt_valor(row["Saídas_A"]),
+                "Saídas Final":    _fmt_valor(row["Saídas_T"]),
+                "Diferença":       _fmt_valor(row["Diferença"]),
+            })
+        return pd.DataFrame(rows)
+
+    df_result = _enriquece(df_dif)
+
+    total_empresas = len(df_merge)
+    total_dif      = len(df_result)
+    total_ok       = len(df_ok)
+
+    # ── cabeçalho ─────────────────────────────────────────────────────────────
+    st.markdown("<h2>SEFAZ COMPARAÇÃO</h2>", unsafe_allow_html=True)
+    st.markdown(
+        f"<p style='text-align:right; font-size:20px;'>"
+        f"<b>Com divergência:</b> {total_dif} &nbsp;|&nbsp; "
+        f"<b>Sem divergência:</b> {total_ok} &nbsp;|&nbsp; "
+        f"<b>Total:</b> {total_empresas}</p>",
+        unsafe_allow_html=True,
+    )
+
+    # ── donut ─────────────────────────────────────────────────────────────────
+    if "sefaz_comp_key" not in st.session_state:
+        st.session_state["sefaz_comp_key"] = 0
+
+    pct_dif = round(total_dif / total_empresas * 100) if total_empresas else 0
+    pct_ok  = round(total_ok  / total_empresas * 100) if total_empresas else 0
+
+    fig = go.Figure(data=[go.Pie(
+        labels=["Com Divergência", "Sem Divergência"],
+        values=[int(total_dif), int(total_ok)],
+        hole=0.68,
+        marker=dict(
+            colors=["#c0392b", "#27ae60"],
+            line=dict(color="#ffffff", width=3),
+        ),
+        textinfo="none",
+        hovertemplate="<b>%{label}</b><br>%{value} empresa(s) — %{percent}<extra></extra>",
+        direction="clockwise",
+        sort=False,
+    )])
+    fig.update_layout(
+        paper_bgcolor="white", plot_bgcolor="white",
+        showlegend=False,
+        margin=dict(t=20, b=20, l=20, r=20),
+        height=300,
+        annotations=[dict(
+            text=f"<b>{total_empresas}</b><br><span style='font-size:11px'>empresas</span>",
+            x=0.5, y=0.5,
+            xanchor="center", yanchor="middle",
+            showarrow=False,
+            font=dict(size=22, color="#1d3f77"),
+        )],
+    )
+
+    col_esq, col_centro, col_dir = st.columns([1, 2, 1])
+    with col_centro:
+        st.plotly_chart(
+            fig,
+            use_container_width=True,
+            key=f"chart_sefaz_comp_{st.session_state['sefaz_comp_key']}",
+        )
+
+    col_l, col_r = st.columns(2)
+    with col_l:
+        st.markdown(
+            f"<div style='text-align:center; padding:8px; background:#fdedec; "
+            f"border-radius:8px; border-left:4px solid #c0392b;'>"
+            f"<span style='font-size:22px; font-weight:700; color:#c0392b;'>{total_dif}</span><br>"
+            f"<span style='font-size:13px; color:#555;'>Com Divergência ({pct_dif}%)</span></div>",
+            unsafe_allow_html=True,
+        )
+    with col_r:
+        st.markdown(
+            f"<div style='text-align:center; padding:8px; background:#eafaf1; "
+            f"border-radius:8px; border-left:4px solid #27ae60;'>"
+            f"<span style='font-size:22px; font-weight:700; color:#27ae60;'>{total_ok}</span><br>"
+            f"<span style='font-size:13px; color:#555;'>Sem Divergência ({pct_ok}%)</span></div>",
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    if st.button("Ver empresas com divergência", use_container_width=True,
+                 key="btn_sefaz_comp_dif"):
+        if not df_result.empty:
+            _modal_sefaz_comparacao(df_result)
+        else:
+            st.info("Nenhuma divergência encontrada!")
+
+    st.divider()
+
+    # ── lista ─────────────────────────────────────────────────────────────────
+    st.markdown("### Lista de Divergências", unsafe_allow_html=True)
+
+    if not df_result.empty:
+        df_exib = _sanitiza_df(df_result)
+        exibe_aggrid(df_exib, height=400, grid_key="grid_sefaz_comp")
+
+        output = BytesIO()
+        df_result.to_excel(output, index=False)
+        st.download_button(
+            "Baixar Excel", data=output.getvalue(),
+            file_name="sefaz_comparacao.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    else:
+        st.success("Nenhuma divergência encontrada entre as colunas!")
+
 # ============================================================================
 # ROTEAMENTO
 # ============================================================================
 
 with st.session_state.main_container.container():
-    if pagina == "Dashboard":
+    if pagina == "DASHBOARD":
         pagina_dashboard_paralegal()
     elif pagina == "EMPRESAS":
         pagina_empresas()
@@ -947,5 +2748,13 @@ with st.session_state.main_container.container():
         pagina_rest()
     elif pagina == "SEFAZ":
         pagina_sefaz()
-    elif pagina == "CND Municipal":
+    elif pagina == "LEITURA XML DMS":
+        pagina_leitura_xml_dms()
+    elif pagina == "LEITURA XML REST":
+        pagina_leitura_xml_rest()    
+    elif pagina == "CND MUNICIPAL":
         pagina_cnd_municipal()
+    elif pagina == "SEM ACESSO":
+        pagina_sem_acesso()
+    elif pagina == "SEFAZ COMPARAÇÃO":
+        pagina_sefaz_comparacao()    
