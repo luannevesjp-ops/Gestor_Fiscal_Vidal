@@ -1527,16 +1527,13 @@ def pagina_cnd_municipal():
     colunas_existentes = [c for c in colunas_solicitadas if c in df_cnd.columns]
     df_cnd = df_cnd[colunas_existentes].copy()
     
+    if "Código" in df_cnd.columns:
+        df_cnd["Código"] = df_cnd["Código"].apply(
+            lambda v: str(v).strip().removesuffix(".0") if pd.notna(v) else ""
+        )
+
     if "VALIDADE" in df_cnd.columns:
         df_cnd["VALIDADE"] = pd.to_datetime(df_cnd["VALIDADE"], errors='coerce').dt.strftime("%d/%m/%Y").fillna("")
-    
-    def check_pdf_link(link):
-        return "Disponível" if pd.notna(link) and str(link).strip() != "" else "Indisponível"
-    
-    if "LINK CND MUNICIPAL" in df_cnd.columns:
-        df_cnd["PDF"] = df_cnd["LINK CND MUNICIPAL"].apply(check_pdf_link)
-    else:
-        df_cnd["PDF"] = "Indisponível"
     
     if "SITUAÇÃO CND MUNICIPAL" in df_cnd.columns:
         situacao_upper = df_cnd["SITUAÇÃO CND MUNICIPAL"].astype(str).str.upper().str.strip()
