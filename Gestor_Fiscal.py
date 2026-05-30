@@ -362,8 +362,8 @@ def pagina_simples():
 
     competencia_raw = df["PERÍODO DE COMPETÊNCIA"].iloc[0] \
         if "PERÍODO DE COMPETÊNCIA" in df.columns else ""
-    competencia = pd.to_datetime(competencia_raw, errors="coerce").strftime("%m/%Y") \
-        if competencia_raw else ""
+    _dt_comp = pd.to_datetime(competencia_raw, errors="coerce")
+    competencia = _dt_comp.strftime("%m/%Y") if not pd.isna(_dt_comp) else ""
 
     if "Situação" not in df.columns:
         st.error("Coluna 'Situação' não encontrada.")
@@ -534,8 +534,8 @@ def pagina_reinf():
 
     competencia_raw = df["PERÍODO DE COMPETÊNCIA"].iloc[0] \
         if "PERÍODO DE COMPETÊNCIA" in df.columns else ""
-    competencia = pd.to_datetime(competencia_raw, errors="coerce").strftime("%m/%Y") \
-        if competencia_raw else ""
+    _dt_comp = pd.to_datetime(competencia_raw, errors="coerce")
+    competencia = _dt_comp.strftime("%m/%Y") if not pd.isna(_dt_comp) else ""
 
     if "Situação" not in df.columns:
         st.error("Coluna 'Situação' não encontrada.")
@@ -754,33 +754,20 @@ def pagina_dctf_web():
             return "Sem Procuração"
         return "Não Concluída"
 
-    if "SITUAÇÃO DCTF" in df_dctf.columns:
-        df_dctf["SITUAÇÃO DCTF"] = df_dctf["SITUAÇÃO DCTF"].apply(_classifica_dctf)
-    else:
-        df_dctf["SITUAÇÃO DCTF"] = "Não Concluída"
+    col_sit = "SITUAÇÃO DCTF"
+    df_dctf["_status"] = df_dctf[col_sit].apply(_classifica_dctf) \
+        if col_sit in df_dctf.columns else "Não Concluída"
 
-    # ── filiais ficam como "Filial" ───────────────────────────────────────────
     if "MATRIZ / FILIAL" in df_dctf.columns:
         mask_filial = df_dctf["MATRIZ / FILIAL"].astype(str).str.strip().str.upper() == "FILIAL"
-        df_dctf.loc[mask_filial, "SITUAÇÃO DCTF"] = "Filial"
+        df_dctf.loc[mask_filial, "_status"] = "Filial"
 
     # ── contagens ─────────────────────────────────────────────────────────────
-    concluidas     = (df_dctf["SITUAÇÃO DCTF"] == "Concluída").sum()
-    sem_procuracao = (df_dctf["SITUAÇÃO DCTF"] == "Sem Procuração").sum()
-    nao_concluidas = (df_dctf["SITUAÇÃO DCTF"] == "Não Concluída").sum()
-    filiais        = (df_dctf["SITUAÇÃO DCTF"] == "Filial").sum()
+    concluidas     = (df_dctf["_status"] == "Concluída").sum()
+    sem_procuracao = (df_dctf["_status"] == "Sem Procuração").sum()
+    nao_concluidas = (df_dctf["_status"] == "Não Concluída").sum()
+    filiais        = (df_dctf["_status"] == "Filial").sum()
     total          = concluidas + sem_procuracao + nao_concluidas
-
-    st.markdown("<h2>DCTF WEB</h2>", unsafe_allow_html=True)
-    st.markdown(
-        f"<p style='text-align:right; font-size:20px;'>"
-        f"<b>Concluídas:</b> {concluidas} &nbsp;|&nbsp; "
-        f"<b>Sem Procuração:</b> {sem_procuracao} &nbsp;|&nbsp; "
-        f"<b>Não Concluídas:</b> {nao_concluidas} &nbsp;|&nbsp; "
-        f"<b>Filiais:</b> {filiais} &nbsp;|&nbsp; "
-        f"<b>Competência:</b> {competencia}</p>",
-        unsafe_allow_html=True,
-    )
 
     # ── donut ─────────────────────────────────────────────────────────────────
     if "dctf_chart_key" not in st.session_state:
@@ -842,7 +829,7 @@ def pagina_dctf_web():
         )
         if st.button("Ver sem procuração", use_container_width=True,
                      key="btn_dctf_sem_proc"):
-            df_sp = df_dctf[df_dctf["SITUAÇÃO DCTF"] == "Sem Procuração"]
+            df_sp = df_dctf[df_dctf["_status"] == "Sem Procuração"]
             _modal_dctf_sem_procuracao(df_sp)
     with col_r:
         st.markdown(
@@ -854,13 +841,13 @@ def pagina_dctf_web():
         )
         if st.button("Ver não concluídas", use_container_width=True,
                      key="btn_dctf_nao_conc"):
-            df_nc = df_dctf[df_dctf["SITUAÇÃO DCTF"] == "Não Concluída"]
+            df_nc = df_dctf[df_dctf["_status"] == "Não Concluída"]
             _modal_dctf_nao_concluidas(df_nc)
 
     st.divider()
 
     # ── tabela principal ──────────────────────────────────────────────────────
-    df_dctf = _sanitiza_df(df_dctf)
+    df_dctf = _sanitiza_df(df_dctf.drop(columns=["_status"]))
     exibe_aggrid(df_dctf, height=400, grid_key="grid_dctf")
 
     output = BytesIO()
@@ -908,8 +895,8 @@ def pagina_dms():
 
     competencia_raw = df["PERÍODO DE COMPETÊNCIA"].iloc[0] \
         if "PERÍODO DE COMPETÊNCIA" in df.columns else ""
-    competencia = pd.to_datetime(competencia_raw, errors="coerce").strftime("%m/%Y") \
-        if competencia_raw else ""
+    _dt_comp = pd.to_datetime(competencia_raw, errors="coerce")
+    competencia = _dt_comp.strftime("%m/%Y") if not pd.isna(_dt_comp) else ""
 
     if "Situação" not in df.columns:
         st.error("Coluna 'Situação' não encontrada.")
@@ -1166,8 +1153,8 @@ def pagina_rest():
 
     competencia_raw = df["PERÍODO DE COMPETÊNCIA"].iloc[0] \
         if "PERÍODO DE COMPETÊNCIA" in df.columns else ""
-    competencia = pd.to_datetime(competencia_raw, errors="coerce").strftime("%m/%Y") \
-        if competencia_raw else ""
+    _dt_comp = pd.to_datetime(competencia_raw, errors="coerce")
+    competencia = _dt_comp.strftime("%m/%Y") if not pd.isna(_dt_comp) else ""
 
     if "Situação" not in df.columns:
         st.error("Coluna 'Situação' não encontrada.")
