@@ -1431,8 +1431,8 @@ def pagina_sefaz():
 
     competencia_raw = df["PERÍODO DE COMPETÊNCIA"].iloc[0] \
         if "PERÍODO DE COMPETÊNCIA" in df.columns else ""
-    competencia = pd.to_datetime(competencia_raw, errors="coerce").strftime("%m/%Y") \
-        if competencia_raw else ""
+    _dt_comp = pd.to_datetime(competencia_raw, errors="coerce")
+    competencia = _dt_comp.strftime("%m/%Y") if not pd.isna(_dt_comp) else ""
 
     if "Situação" not in df.columns:
         st.error("Coluna 'Situação' não encontrada.")
@@ -2416,7 +2416,11 @@ def _sanitiza_df(df):
     df = df.copy()
     for col in df.columns:
         df[col] = df[col].astype(str).replace("nan", "").replace("None", "")
-    return df                
+    if "Código" in df.columns:
+        df["Código"] = df["Código"].apply(
+            lambda v: v[:-2] if v.endswith(".0") else v
+        )
+    return df              
 
 @st.dialog("Prefeitura — DMS Sem Acesso")
 def _modal_sem_acesso_dms(df_show):
