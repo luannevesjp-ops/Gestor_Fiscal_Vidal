@@ -2535,14 +2535,20 @@ def pagina_sefaz_comparacao():
     if "Código" in df_geral.columns:
         df_geral["Código"] = df_geral["Código"].astype(str).str.strip()
 
+    def _norm_cod(val):
+        s = str(val).strip()
+        if s.endswith(".0"):
+            s = s[:-2]
+        return s.strip()
+
     mapa_empresa = {}
     for _, row in df_geral.iterrows():
-        cod = str(row.get("Código", "")).strip()
-        if cod:
+        cod = _norm_cod(row.get("Código", ""))
+        if cod and cod.upper() not in ("NAN", "NONE", ""):
             mapa_empresa[cod] = {
                 "Razão Social": row.get("Razão Social", ""),
                 "CNPJ": row.get("CNPJ_fmt", ""),
-                "Insc. Estadual":  row.get("Insc. Estadual", ""),
+                "Insc. Estadual": row.get("Insc. Estadual", ""),
             }
 
     # ── identifica colunas por posição ───────────────────────────────────────
@@ -2601,7 +2607,7 @@ def pagina_sefaz_comparacao():
     def _enriquece(df_in):
         rows = []
         for _, row in df_in.iterrows():
-            cod = str(row["Código"]).strip()
+            cod = _norm_cod(row["Código"])
             emp = mapa_empresa.get(cod, {})
 
             def _fmt_valor(v):
