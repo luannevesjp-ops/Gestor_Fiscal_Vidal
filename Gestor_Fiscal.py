@@ -292,7 +292,8 @@ def pagina_empresas():
         return
     
     competencia_raw = df["PERÍODO DE COMPETÊNCIA"].iloc[0] if "PERÍODO DE COMPETÊNCIA" in df.columns else ""
-    competencia = pd.to_datetime(competencia_raw, errors='coerce').strftime("%m/%Y") if competencia_raw else ""
+    _dt_comp = pd.to_datetime(competencia_raw, errors='coerce')
+    competencia = _dt_comp.strftime("%m/%Y") if not pd.isna(_dt_comp) else ""
     
     if "Situação" in df.columns:
         df_empresas = df[df["Situação"].astype(str).str.upper() == "ATIVA"]
@@ -684,56 +685,191 @@ def pagina_reinf():
     )
 
 
+@st.dialog("DCTF WEB — Sem Procuração")
+def _modal_dctf_sem_procuracao(df_show):
+    st.markdown(f"**{df_show.shape[0]} empresa(s) sem procuração**")
+    cols = [c for c in ["Código", "Razão Social", "CNPJ", "Regime",
+                        "SITUAÇÃO DCTF", "MATRIZ / FILIAL"]
+            if c in df_show.columns]
+    df_exib = df_show[cols].copy()
+    if "CNPJ" in df_exib.columns:
+        df_exib["CNPJ"] = df_exib["CNPJ"].apply(_normaliza_cnpj)
+    st.dataframe(df_exib.reset_index(drop=True),
+                 use_container_width=True, hide_index=True)
+
+
+@st.dialog("DCTF WEB — Não Concluídas")
+def _modal_dctf_nao_concluidas(df_show):
+    st.markdown(f"**{df_show.shape[0]} empresa(s) não concluída(s)**")
+    cols = [c for c in ["Código", "Razão Social", "CNPJ", "Regime",
+                        "SITUAÇÃO DCTF", "MATRIZ / FILIAL"]
+            if c in df_show.columns]
+    df_exib = df_show[cols].copy()
+    if "CNPJ" in df_exib.columns:
+        df_exib["CNPJ"] = df_exib["CNPJ"].apply(_normaliza_cnpj)
+    st.dataframe(df_exib.reset_index(drop=True),
+                 use_container_width=True, hide_index=True)
+
+
+@st.fragment
 def pagina_dctf_web():
+    import plotly.graph_objects as go
     st.empty()
+
     df = le_planilha_google(GOOGLE_SHEET_URL, SHEET_EMPRESAS)
     if df is None or df.empty:
         st.warning("Nenhum dado encontrado.")
         return
-    
+
     df = df.fillna("")
     df = df[df["Situação"].astype(str).str.upper() == "ATIVA"]
     if df.empty:
         st.warning("Nenhuma empresa ATIVA encontrada.")
         return
-    
-    competencia = ""
-    if "PERÍODO DE COMPETÊNCIA" in df.columns:
-        try:
-            competencia_dt = pd.to_datetime(df["PERÍODO DE COMPETÊNCIA"].iloc[0], errors="coerce")
-            if not pd.isna(competencia_dt):
-                competencia = competencia_dt.strftime("%m/%Y")
-        except:
-            pass
-    
-    if "PERÍODO" in df.columns:
-        df["PERÍODO"] = pd.to_datetime(df["PERÍODO"], errors="coerce").dt.strftime("%m-%Y").fillna("")
-    
-    df_dctf = df[["Código", "Razão Social", "CNPJ", "Regime", "PERÍODO", "ORIGEM", "TIPO", 
-                  "SITUAÇÃO DCTF", "MATRIZ / FILIAL", "Situação"]].copy()
-    
-    concluidas = df_dctf[df_dctf["SITUAÇÃO DCTF"].astype(str).str.upper() == "ATIVA"].shape[0]
-    sem_procuracao = df_dctf[df_dctf["SITUAÇÃO DCTF"].astype(str).str.upper() == "SEM PROCURAÇÃO"].shape[0]
-    filiais = df_dctf[df_dctf["MATRIZ / FILIAL"].astype(str).str.upper() == "FILIAL"].shape[0]
-    nao_concluidas_total = df_dctf[~df_dctf["SITUAÇÃO DCTF"].astype(str).str.upper().isin(["ATIVA", "SEM PROCURAÇÃO"])].shape[0]
-    nao_concluidas = max(0, nao_concluidas_total - filiais)
-    
-    st.markdown(f"<h2>DCTF WEB</h2><p style='text-align:right; font-size:20px;'>"
-                f"<b>Concluídas:</b> {concluidas} | <b>Sem Procuração:</b> {sem_procuracao} | "
-                f"<b>Filiais:</b> {filiais} | <b>Não concluídas:</b> {nao_concluidas} | "
-                f"<b>Competência:</b> {competencia}</p>", unsafe_allow_html=True)
-    
-    gb = GridOptionsBuilder.from_dataframe(df_dctf)
-    gb.configure_default_column(resizable=True, filter=True, sortable=True)
-    gb.configure_grid_options(domLayout="normal")
-    
-    AgGrid(df_dctf, gridOptions=gb.build(), update_mode=GridUpdateMode.NO_UPDATE,
-           fit_columns_on_grid_load=True, height=600)
-    
+
+    competencia_raw = df["PERÍODO DE COMPETÊNCIA"].iloc[0] \
+        if "PERÍODO DE COMPETÊNCIA" in df.columns else ""
+    _dt_comp = pd.to_datetime(competencia_raw, errors='coerce')
+    competencia = _dt_comp.strftime("%m/%Y") if not pd.isna(_dt_comp) else ""
+
+    # ── colunas para exibição ─────────────────────────────────────────────────
+    colunas = ["Código", "Razão Social", "CNPJ", "Regime", "PERÍODO", "ORIGEM",
+               "TIPO", "SITUAÇÃO DCTF", "MATRIZ / FILIAL", "Situação"]
+    df_dctf = df[[c for c in colunas if c in df.columns]].copy()
+
+    if "PERÍODO" in df_dctf.columns:
+        df_dctf["PERÍODO"] = pd.to_datetime(
+            df_dctf["PERÍODO"], errors="coerce"
+        ).dt.strftime("%m-%Y").fillna("")
+
+    if "CNPJ" in df_dctf.columns:
+        df_dctf["CNPJ"] = df_dctf["CNPJ"].apply(_normaliza_cnpj)
+
+    # ── classificação ─────────────────────────────────────────────────────────
+    def _classifica_dctf(val):
+        v = str(val).strip().upper()
+        if "CONCLUÍDA" in v or "CONCLUIDA" in v or v == "ATIVA":
+            return "Concluída"
+        if "PROCURA" in v:
+            return "Sem Procuração"
+        return "Não Concluída"
+
+    if "SITUAÇÃO DCTF" in df_dctf.columns:
+        df_dctf["SITUAÇÃO DCTF"] = df_dctf["SITUAÇÃO DCTF"].apply(_classifica_dctf)
+    else:
+        df_dctf["SITUAÇÃO DCTF"] = "Não Concluída"
+
+    # ── filiais ficam como "Filial" ───────────────────────────────────────────
+    if "MATRIZ / FILIAL" in df_dctf.columns:
+        mask_filial = df_dctf["MATRIZ / FILIAL"].astype(str).str.strip().str.upper() == "FILIAL"
+        df_dctf.loc[mask_filial, "SITUAÇÃO DCTF"] = "Filial"
+
+    # ── contagens ─────────────────────────────────────────────────────────────
+    concluidas     = (df_dctf["SITUAÇÃO DCTF"] == "Concluída").sum()
+    sem_procuracao = (df_dctf["SITUAÇÃO DCTF"] == "Sem Procuração").sum()
+    nao_concluidas = (df_dctf["SITUAÇÃO DCTF"] == "Não Concluída").sum()
+    filiais        = (df_dctf["SITUAÇÃO DCTF"] == "Filial").sum()
+    total          = concluidas + sem_procuracao + nao_concluidas
+
+    st.markdown("<h2>DCTF WEB</h2>", unsafe_allow_html=True)
+    st.markdown(
+        f"<p style='text-align:right; font-size:20px;'>"
+        f"<b>Concluídas:</b> {concluidas} &nbsp;|&nbsp; "
+        f"<b>Sem Procuração:</b> {sem_procuracao} &nbsp;|&nbsp; "
+        f"<b>Não Concluídas:</b> {nao_concluidas} &nbsp;|&nbsp; "
+        f"<b>Filiais:</b> {filiais} &nbsp;|&nbsp; "
+        f"<b>Competência:</b> {competencia}</p>",
+        unsafe_allow_html=True,
+    )
+
+    # ── donut ─────────────────────────────────────────────────────────────────
+    if "dctf_chart_key" not in st.session_state:
+        st.session_state["dctf_chart_key"] = 0
+
+    pct_c  = round(concluidas     / total * 100) if total else 0
+    pct_sp = round(sem_procuracao / total * 100) if total else 0
+    pct_nc = round(nao_concluidas / total * 100) if total else 0
+
+    fig = go.Figure(data=[go.Pie(
+        labels=["Concluídas", "Sem Procuração", "Não Concluídas"],
+        values=[int(concluidas), int(sem_procuracao), int(nao_concluidas)],
+        hole=0.68,
+        marker=dict(
+            colors=["#27ae60", "#e67e22", "#e74c3c"],
+            line=dict(color="#ffffff", width=3),
+        ),
+        textinfo="none",
+        hovertemplate="<b>%{label}</b><br>%{value} empresa(s) — %{percent}<extra></extra>",
+        direction="clockwise",
+        sort=False,
+    )])
+    fig.update_layout(
+        paper_bgcolor="white", plot_bgcolor="white",
+        showlegend=False,
+        margin=dict(t=20, b=20, l=20, r=20),
+        height=300,
+        annotations=[dict(
+            text=f"<b>{total}</b><br><span style='font-size:11px'>empresas</span>",
+            x=0.5, y=0.5,
+            xanchor="center", yanchor="middle",
+            showarrow=False,
+            font=dict(size=22, color="#1d3f77"),
+        )],
+    )
+
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        key=f"chart_dctf_{st.session_state['dctf_chart_key']}",
+    )
+
+    col_l, col_m, col_r = st.columns(3)
+    with col_l:
+        st.markdown(
+            f"<div style='text-align:center; padding:8px; background:#f0faf4; "
+            f"border-radius:8px; border-left:4px solid #27ae60;'>"
+            f"<span style='font-size:22px; font-weight:700; color:#27ae60;'>{concluidas}</span><br>"
+            f"<span style='font-size:13px; color:#555;'>Concluídas ({pct_c}%)</span></div>",
+            unsafe_allow_html=True,
+        )
+    with col_m:
+        st.markdown(
+            f"<div style='text-align:center; padding:8px; background:#fdf3e7; "
+            f"border-radius:8px; border-left:4px solid #e67e22;'>"
+            f"<span style='font-size:22px; font-weight:700; color:#e67e22;'>{sem_procuracao}</span><br>"
+            f"<span style='font-size:13px; color:#555;'>Sem Procuração ({pct_sp}%)</span></div>",
+            unsafe_allow_html=True,
+        )
+        if st.button("Ver sem procuração", use_container_width=True,
+                     key="btn_dctf_sem_proc"):
+            df_sp = df_dctf[df_dctf["SITUAÇÃO DCTF"] == "Sem Procuração"]
+            _modal_dctf_sem_procuracao(df_sp)
+    with col_r:
+        st.markdown(
+            f"<div style='text-align:center; padding:8px; background:#fdf2f2; "
+            f"border-radius:8px; border-left:4px solid #e74c3c;'>"
+            f"<span style='font-size:22px; font-weight:700; color:#e74c3c;'>{nao_concluidas}</span><br>"
+            f"<span style='font-size:13px; color:#555;'>Não Concluídas ({pct_nc}%)</span></div>",
+            unsafe_allow_html=True,
+        )
+        if st.button("Ver não concluídas", use_container_width=True,
+                     key="btn_dctf_nao_conc"):
+            df_nc = df_dctf[df_dctf["SITUAÇÃO DCTF"] == "Não Concluída"]
+            _modal_dctf_nao_concluidas(df_nc)
+
+    st.divider()
+
+    # ── tabela principal ──────────────────────────────────────────────────────
+    df_dctf = _sanitiza_df(df_dctf)
+    exibe_aggrid(df_dctf, height=400, grid_key="grid_dctf")
+
     output = BytesIO()
     df_dctf.to_excel(output, index=False)
-    st.download_button("Baixar Excel", data=output.getvalue(), file_name="dctf_web.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.download_button(
+        "Baixar Excel", data=output.getvalue(),
+        file_name="dctf_web.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 
 @st.dialog("DMS — Sem Acesso")
@@ -1515,7 +1651,8 @@ def pagina_cnd_municipal():
         return
     
     competencia_raw = df.get("PERÍODO DE COMPETÊNCIA", [""])[0]
-    competencia = pd.to_datetime(competencia_raw, errors='coerce').strftime("%m/%Y") if competencia_raw else ""
+    _dt_comp = pd.to_datetime(competencia_raw, errors='coerce')
+    competencia = _dt_comp.strftime("%m/%Y") if not pd.isna(_dt_comp) else ""
     
     df_cnd = df[df["Situação"].astype(str).str.upper() == "ATIVA"] if "Situação" in df.columns else pd.DataFrame()
     if df_cnd.empty:
