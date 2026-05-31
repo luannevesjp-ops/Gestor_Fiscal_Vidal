@@ -10,6 +10,12 @@ from datetime import datetime
 from io import BytesIO
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
 from st_aggrid.shared import JsCode
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+
+# ── ID da planilha Google (para backup persistente) ───────────────────────────
+_SPREADSHEET_ID = "1bp7qtkKvsMHMvHjGznT6OwyX_YSQWMa3jVvylOJWSxM"
+_SHEET_BACKUP   = "SALVAMENTO CONTROLE"
 
 # ============================================================================
 # CONFIGURAÇÃO
@@ -283,19 +289,95 @@ def _load(table, where="", params=()):
 
 
 def _save_grid(df, table):
+    """Salva alterações no SQLite. Usa cod+competencia como chave alternativa se id não disponível."""
     conn = get_conn()
     c = conn.cursor()
     for _, row in df.iterrows():
-        d = {k: (v if v is not None else "") for k, v in row.to_dict().items()}
+        d = {k: ("" if (v is None or (isinstance(v, float) and pd.isna(v))) else str(v))
+             for k, v in row.to_dict().items()}
         row_id = d.pop("id", None)
+        # id pode vir como float ("1.0") — converte para int
+        if row_id is not None:
+            try:
+                row_id = int(float(row_id))
+            except (ValueError, TypeError):
+                row_id = None
         if not row_id:
             continue
         d.pop("competencia", None)
-        sets = ", ".join([f"{k}=?" for k in d])
+        sets = ", ".join([f'"{k}"=?' for k in d])
         vals = list(d.values()) + [row_id]
-        c.execute(f"UPDATE {table} SET {sets} WHERE id=?", vals)
+        c.execute(f'UPDATE {table} SET {sets} WHERE id=?', vals)
     conn.commit()
     conn.close()
+
+
+# ── Google Sheets — backup persistente ───────────────────────────────────────
+
+def _gc():
+    """Retorna cliente gspread autenticado via st.secrets, ou None se não configurado."""
+    try:
+        scope = ["https://spreadsheets.google.com/feeds",
+                 "https://www.googleapis.com/auth/drive"]
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(
+            dict(st.secrets["gcp_service_account"]), scope
+        )
+        return gspread.authorize(creds)
+    except Exception:
+        return None
+
+
+def _sheets_salvar(table_name, df_local):
+    """Grava o conteúdo de uma tabela SQLite na aba correspondente do Google Sheets."""
+    gc = _gc()
+    if gc is None:
+        return False
+    try:
+        sh = gc.open_by_key(_SPREADSHEET_ID)
+        aba = f"CTRL_{table_name}"
+        try:
+            ws = sh.worksheet(aba)
+        except gspread.WorksheetNotFound:
+            ws = sh.add_worksheet(title=aba, rows=2000, cols=50)
+        ws.clear()
+        df_str = df_local.astype(str).replace("nan", "").replace("None", "")
+        data = [df_str.columns.tolist()] + df_str.values.tolist()
+        ws.update(data)
+        return True
+    except Exception:
+        return False
+
+
+def _sheets_restaurar(table_name):
+    """Tenta restaurar dados do Google Sheets para o SQLite local."""
+    gc = _gc()
+    if gc is None:
+        return False
+    try:
+        sh = gc.open_by_key(_SPREADSHEET_ID)
+        aba = f"CTRL_{table_name}"
+        ws = sh.worksheet(aba)
+        records = ws.get_all_records()
+        if not records:
+            return False
+        df = pd.DataFrame(records)
+        conn = get_conn()
+        df.to_sql(table_name, conn, if_exists="replace", index=False)
+        conn.close()
+        return True
+    except Exception:
+        return False
+
+
+def _restaurar_se_vazio(table_name):
+    """Se a tabela local estiver vazia, tenta restaurar do Google Sheets."""
+    df = _load(table_name)
+    if df.empty:
+        _sheets_restaurar(table_name)
+
+
+# Restaura empresas na inicialização da página (evita perda entre reinícios)
+_restaurar_se_vazio("empresas_controle")
 
 
 def _auto_populate(table, competencia, filtro_fn):
@@ -383,12 +465,15 @@ def _build_grid(df, edit_cols=None, height=450, key="grid", selection=False):
         enableCellTextSelection=True, suppressMenuHide=True,
         localeText={"filterOoo": "Filtrar...", "noRowsToShow": "Nenhum registro"},
     )
-    update_on = ["selectionChanged"] if selection else []
+    # Combina VALUE_CHANGED + SELECTION_CHANGED quando seleção está ativa
+    if selection:
+        mode = GridUpdateMode.VALUE_CHANGED | GridUpdateMode.SELECTION_CHANGED
+    else:
+        mode = GridUpdateMode.VALUE_CHANGED
     return AgGrid(
         df, gridOptions=gb.build(), height=height, key=key,
         fit_columns_on_grid_load=False, enable_enterprise_modules=False,
-        update_mode=GridUpdateMode.VALUE_CHANGED,
-        update_on=update_on,
+        update_mode=mode,
         allow_unsafe_jscode=True, reload_data=False,
     )
 
@@ -459,7 +544,11 @@ def _menu_controle(titulo, table, filtro_fn, colunas, edit_gestor, edit_fiscal, 
             df_new = pd.DataFrame(resp_grid["data"])
             if not df_new.empty:
                 _save_grid(df_new, table)
-                st.success("Alterações salvas!")
+                # Sincroniza com Google Sheets
+                df_full = _load(table, "competencia=?", (comp,))
+                ok = _sheets_salvar(table, df_full)
+                msg = "✅ Salvo e sincronizado!" if ok else "✅ Salvo localmente."
+                st.success(msg)
                 st.rerun()
     with col_d:
         _download_btn(df_exib.drop(columns=["id"], errors="ignore"),
@@ -608,33 +697,52 @@ def pagina_empresas_ctrl():
     resp_grid = _build_grid(df_show, edit_cols=edit_emp,
                             key="grid_emp_ctrl", selection=_GESTOR)
 
-    col_s, col_e, col_d = st.columns([1, 1, 3])
+    col_s, col_e, col_d = st.columns([1, 1, 2])
     with col_s:
         if _GESTOR and st.button("💾 Salvar Alterações", type="primary", key="save_emp"):
             df_edited = pd.DataFrame(resp_grid["data"])
-            df_edited_rev = df_edited.rename(columns={v: k for k, v in RENAME.items()})
-            if "id" in df_edited_rev.columns:
-                _save_grid(df_edited_rev, "empresas_controle")
-            st.success("Salvo!")
+            # Reverte nomes de coluna para os nomes do banco
+            df_rev = df_edited.rename(columns={v: k for k, v in RENAME.items()})
+            _save_grid(df_rev, "empresas_controle")
+            # Registra alteração
+            conn = get_conn()
+            conn.execute("""INSERT INTO alteracao_empresa(tipo,cod,razao_social,cnpj,usuario,observacao)
+                VALUES('ALTERAÇÃO','--','--','--',?,'Edição em lote via grade')""", (_NIVEL,))
+            conn.commit()
+            conn.close()
+            # Sincroniza com Google Sheets
+            df_atual = _load("empresas_controle", "ativo=1")
+            ok = _sheets_salvar("empresas_controle", df_atual)
+            msg = "✅ Salvo e sincronizado com a planilha!" if ok else "✅ Salvo localmente. (Planilha Google não configurada)"
+            st.success(msg)
             st.rerun()
 
     with col_e:
         if _GESTOR:
             sel = resp_grid.get("selected_rows", [])
-            if sel is not None and len(sel) > 0:
-                row = sel.iloc[0].to_dict() if hasattr(sel, "iloc") else sel[0]
-                if st.button("🗑️ Excluir Selecionada", key="btn_exc_emp"):
-                    cod_s   = row.get("CÓD", "")
-                    razao_s = row.get("RAZÃO SOCIAL", "")
-                    cnpj_s  = row.get("CNPJ", "")
+            # sel pode ser DataFrame (versões novas do st_aggrid) ou lista
+            tem_sel = (
+                (isinstance(sel, pd.DataFrame) and not sel.empty) or
+                (isinstance(sel, list) and len(sel) > 0)
+            )
+            if tem_sel:
+                row = sel.iloc[0].to_dict() if isinstance(sel, pd.DataFrame) else sel[0]
+                cod_s   = row.get("CÓD", "")
+                razao_s = row.get("RAZÃO SOCIAL", "")
+                cnpj_s  = row.get("CNPJ", "")
+                if st.button(f"🗑️ Excluir: {razao_s[:25]}", key="btn_exc_emp", type="secondary"):
                     conn = get_conn()
                     conn.execute("UPDATE empresas_controle SET ativo=0 WHERE cod=?", (cod_s,))
                     conn.execute("""INSERT INTO alteracao_empresa(tipo,cod,razao_social,cnpj,usuario)
                         VALUES('EXCLUSÃO',?,?,?,?)""", (cod_s, razao_s, cnpj_s, _NIVEL))
                     conn.commit()
                     conn.close()
+                    # Sincroniza
+                    _sheets_salvar("empresas_controle", _load("empresas_controle", "ativo=1"))
                     st.success(f"Empresa '{razao_s}' excluída.")
                     st.rerun()
+            else:
+                st.caption("← Selecione uma linha para excluir")
 
     with col_d:
         _download_btn(df_show.drop(columns=["id"], errors="ignore"), "empresas_controle", "emp")
