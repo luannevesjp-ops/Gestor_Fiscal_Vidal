@@ -245,7 +245,7 @@ def check_auth():
                     st.session_state["autenticado"]  = True
                     st.rerun()
                 else:
-                    st.error("Senha incorreta. Use GESTOR ou FISCAL.")
+                    st.error("Senha incorreta.")
             if st.button("Voltar ao Sistema", use_container_width=True, key="ctrl_btn_voltar_login"):
                 st.switch_page("Gestor_Fiscal.py")
         st.stop()
@@ -427,7 +427,7 @@ def _menu_controle(titulo, table, filtro_fn, colunas, edit_gestor, edit_fiscal, 
     # Carrega
     df = _load(table, "competencia=?", (comp,))
     if df.empty:
-        st.info("Nenhuma empresa encontrada. Cadastre empresas no menu EMPRESAS.")
+        st.info("Nenhuma empresa nesta competência. Verifique se há empresas cadastradas no menu **EMPRESAS** e selecione a competência correta.")
         return
     if resp != "Todos" and "responsavel" in df.columns:
         df = df[df["responsavel"].astype(str) == resp]
@@ -509,7 +509,7 @@ def pagina_empresas_ctrl():
 
     # --- Adicionar empresa (só GESTOR) ---
     if _GESTOR:
-        with st.expander("➕ Nova Empresa", expanded=False):
+        with st.expander("➕ Nova Empresa", expanded=True):
             c1, c2, c3 = st.columns(3)
             with c1:
                 n_cod    = st.text_input("Código*", key="ne_cod")
@@ -557,7 +557,10 @@ def pagina_empresas_ctrl():
     # --- Listagem ---
     df = _load("empresas_controle", "ativo=1")
     if df.empty:
-        st.info("Nenhuma empresa cadastrada.")
+        if _GESTOR:
+            st.info("Nenhuma empresa cadastrada. Use o formulário acima para adicionar.")
+        else:
+            st.info("Nenhuma empresa cadastrada.")
         return
 
     COLS = ["id","cod","razao_social","cnpj","regime","matriz_filial",
