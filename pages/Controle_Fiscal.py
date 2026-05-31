@@ -6,10 +6,16 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import os
+import re
+import requests
 from datetime import datetime
 from io import BytesIO
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
 from st_aggrid.shared import JsCode
+
+# URL da planilha Google (para leitura e importação)
+_SHEET_URL   = "https://docs.google.com/spreadsheets/d/1bp7qtkKvsMHMvHjGznT6OwyX_YSQWMa3jVvylOJWSxM/export?format=xlsx"
+_SHEET_GERAL = "GERAL"
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
@@ -380,6 +386,71 @@ def _restaurar_se_vazio(table_name):
 _restaurar_se_vazio("empresas_controle")
 
 
+def _normaliza_cnpj(val):
+    digits = re.sub(r"\D", "", str(val))
+    if len(digits) == 15:
+        digits = digits[:14]
+    return digits.zfill(14)
+
+
+def _importar_empresas_sheets():
+    """Lê GERAL do Google Sheets e importa empresas ATIVAS para o SQLite."""
+    try:
+        resp = requests.get(_SHEET_URL, timeout=30)
+        resp.raise_for_status()
+        df = pd.read_excel(BytesIO(resp.content), sheet_name=_SHEET_GERAL, engine="openpyxl")
+        df.columns = df.columns.str.strip()
+    except Exception as ex:
+        return 0, f"Erro ao ler a planilha: {ex}"
+
+    if "Situação" not in df.columns:
+        return 0, "Coluna 'Situação' não encontrada."
+
+    df_ativas = df[df["Situação"].astype(str).str.upper() == "ATIVA"].copy()
+    if df_ativas.empty:
+        return 0, "Nenhuma empresa ATIVA encontrada."
+
+    conn = get_conn()
+    inseridos = ignorados = 0
+    try:
+        for _, row in df_ativas.iterrows():
+            def _v(col):
+                val = row.get(col, "")
+                if pd.isna(val):
+                    return ""
+                s = str(val).strip()
+                return s[:-2] if s.endswith(".0") else s
+
+            cod = _v("Código")
+            if not cod:
+                continue
+            exists = conn.execute(
+                "SELECT id FROM empresas_controle WHERE cod=?", (cod,)
+            ).fetchone()
+            if exists is None:
+                conn.execute("""
+                INSERT INTO empresas_controle
+                (cod,razao_social,cnpj,regime,matriz_filial,ie,im,uf,municipio,grupo,criado_por)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                """, (cod, _v("Razão Social"), _normaliza_cnpj(_v("CNPJ")),
+                      _v("Regime"), _v("Matriz / Filial"), _v("Insc. Estadual"),
+                      _v("Insc. Municipal"), _v("Estado"), _v("Município"),
+                      _v("Grupo"), "IMPORTAÇÃO"))
+                conn.execute("""
+                INSERT INTO alteracao_empresa(tipo,cod,razao_social,cnpj,usuario)
+                VALUES('INCLUSÃO',?,?,?,?)
+                """, (cod, _v("Razão Social"), _normaliza_cnpj(_v("CNPJ")), "IMPORTAÇÃO"))
+                inseridos += 1
+            else:
+                ignorados += 1
+        conn.commit()
+    except Exception as ex:
+        conn.close()
+        return 0, f"Erro ao salvar: {ex}"
+    conn.close()
+    return inseridos, f"{inseridos} importada(s). {ignorados} já existia(m) e foram ignorada(s)."
+
+
 def _auto_populate(table, competencia, filtro_fn):
     conn = get_conn()
     existentes = {
@@ -601,6 +672,21 @@ if st.sidebar.button("Sair", use_container_width=True):
 def pagina_empresas_ctrl():
     st.markdown("<h2 style='color:#1d3f77;'>EMPRESAS</h2>", unsafe_allow_html=True)
 
+    # --- Importar do Google Sheets (GESTOR) ---
+    if _GESTOR:
+        col_imp, _ = st.columns([2, 3])
+        with col_imp:
+            if st.button("📥 Importar do Google Sheets", key="btn_importar", type="primary",
+                         use_container_width=True):
+                with st.spinner("Importando..."):
+                    qtd, msg = _importar_empresas_sheets()
+                if qtd >= 0:
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
+        st.divider()
+
     # --- Adicionar empresa (só GESTOR) ---
     if _GESTOR:
         with st.expander("➕ Nova Empresa", expanded=False):
@@ -694,10 +780,9 @@ def pagina_empresas_ctrl():
     df_show = df_show.rename(columns=RENAME)
 
     edit_emp = list(RENAME.values()) if _GESTOR else []
-    resp_grid = _build_grid(df_show, edit_cols=edit_emp,
-                            key="grid_emp_ctrl", selection=_GESTOR)
+    resp_grid = _build_grid(df_show, edit_cols=edit_emp, key="grid_emp_ctrl")
 
-    col_s, col_e, col_d = st.columns([1, 1, 2])
+    col_s, col_d = st.columns([1, 3])
     with col_s:
         if _GESTOR and st.button("💾 Salvar Alterações", type="primary", key="save_emp"):
             df_edited = pd.DataFrame(resp_grid["data"])
@@ -717,35 +802,31 @@ def pagina_empresas_ctrl():
             st.success(msg)
             st.rerun()
 
-    with col_e:
-        if _GESTOR:
-            sel = resp_grid.get("selected_rows", [])
-            # sel pode ser DataFrame (versões novas do st_aggrid) ou lista
-            tem_sel = (
-                (isinstance(sel, pd.DataFrame) and not sel.empty) or
-                (isinstance(sel, list) and len(sel) > 0)
-            )
-            if tem_sel:
-                row = sel.iloc[0].to_dict() if isinstance(sel, pd.DataFrame) else sel[0]
-                cod_s   = row.get("CÓD", "")
-                razao_s = row.get("RAZÃO SOCIAL", "")
-                cnpj_s  = row.get("CNPJ", "")
-                if st.button(f"🗑️ Excluir: {razao_s[:25]}", key="btn_exc_emp", type="secondary"):
-                    conn = get_conn()
-                    conn.execute("UPDATE empresas_controle SET ativo=0 WHERE cod=?", (cod_s,))
-                    conn.execute("""INSERT INTO alteracao_empresa(tipo,cod,razao_social,cnpj,usuario)
-                        VALUES('EXCLUSÃO',?,?,?,?)""", (cod_s, razao_s, cnpj_s, _NIVEL))
-                    conn.commit()
-                    conn.close()
-                    # Sincroniza
-                    _sheets_salvar("empresas_controle", _load("empresas_controle", "ativo=1"))
-                    st.success(f"Empresa '{razao_s}' excluída.")
-                    st.rerun()
-            else:
-                st.caption("← Selecione uma linha para excluir")
-
     with col_d:
         _download_btn(df_show.drop(columns=["id"], errors="ignore"), "empresas_controle", "emp")
+
+    # --- Excluir empresa (selectbox — sempre funciona) ---
+    if _GESTOR:
+        st.divider()
+        st.markdown("#### 🗑️ Excluir Empresa")
+        opcoes = {f"{r['cod']} — {r['razao_social']}": r
+                  for _, r in df.iterrows()}
+        sel_label = st.selectbox("Selecione a empresa para excluir:",
+                                 ["— selecione —"] + list(opcoes.keys()),
+                                 key="sel_exc_emp")
+        if sel_label != "— selecione —":
+            r = opcoes[sel_label]
+            st.warning(f"Empresa selecionada: **{r['razao_social']}** | CNPJ: {r['cnpj']}")
+            if st.button("Confirmar Exclusão", key="btn_exc_emp", type="secondary"):
+                conn = get_conn()
+                conn.execute("UPDATE empresas_controle SET ativo=0 WHERE cod=?", (r["cod"],))
+                conn.execute("""INSERT INTO alteracao_empresa(tipo,cod,razao_social,cnpj,usuario)
+                    VALUES('EXCLUSÃO',?,?,?,?)""", (r["cod"], r["razao_social"], r["cnpj"], _NIVEL))
+                conn.commit()
+                conn.close()
+                _sheets_salvar("empresas_controle", _load("empresas_controle", "ativo=1"))
+                st.success(f"Empresa '{r['razao_social']}' excluída com sucesso.")
+                st.rerun()
 
 # ============================================================================
 # MENU: CALENDÁRIO
