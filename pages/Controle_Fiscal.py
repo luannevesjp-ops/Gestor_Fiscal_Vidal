@@ -318,6 +318,48 @@ def _save_grid(df, table):
     conn.close()
 
 
+_CAMPOS_EMP = {
+    "cod": "Código", "razao_social": "Razão Social", "cnpj": "CNPJ",
+    "regime": "Regime", "matriz_filial": "Matriz/Filial",
+    "ie": "Insc. Estadual", "im": "Insc. Municipal", "uf": "UF",
+    "municipio": "Município", "grupo": "Grupo",
+    "responsavel_fiscal": "Responsável Fiscal", "observacoes": "Observações",
+}
+
+def _log_alteracoes_empresa(df_antes, df_depois):
+    """Compara linha a linha e registra no log o que mudou, campo por campo."""
+    if df_antes.empty or df_depois.empty:
+        return
+    idx = df_antes.set_index("id")
+    conn = get_conn()
+    for _, row_n in df_depois.iterrows():
+        try:
+            rid = int(float(str(row_n.get("id", 0))))
+        except Exception:
+            continue
+        if not rid or rid not in idx.index:
+            continue
+        row_a = idx.loc[rid]
+        diffs = []
+        for campo, nome in _CAMPOS_EMP.items():
+            v_a = str(row_a.get(campo, "") or "").strip()
+            v_n = str(row_n.get(campo, "") or "").strip()
+            if v_a != v_n:
+                diffs.append(f"{nome}: '{v_a}' → '{v_n}'")
+        if diffs:
+            conn.execute("""
+                INSERT INTO alteracao_empresa
+                    (tipo, cod, razao_social, cnpj, usuario, observacao)
+                VALUES ('ALTERAÇÃO', ?, ?, ?, ?, ?)
+            """, (str(row_a.get("cod", "")),
+                  str(row_a.get("razao_social", "")),
+                  str(row_a.get("cnpj", "")),
+                  _NIVEL,
+                  " | ".join(diffs)))
+    conn.commit()
+    conn.close()
+
+
 # ── Google Sheets — backup persistente ───────────────────────────────────────
 
 def _gc():
@@ -786,20 +828,21 @@ def pagina_empresas_ctrl():
     with col_s:
         if _GESTOR and st.button("💾 Salvar Alterações", type="primary", key="save_emp"):
             df_edited = pd.DataFrame(resp_grid["data"])
-            # Reverte nomes de coluna para os nomes do banco
             df_rev = df_edited.rename(columns={v: k for k, v in RENAME.items()})
+            # Carrega estado ANTES para comparar mudanças
+            df_antes = _load("empresas_controle", "ativo=1")
+            # Salva no SQLite
             _save_grid(df_rev, "empresas_controle")
-            # Registra alteração
-            conn = get_conn()
-            conn.execute("""INSERT INTO alteracao_empresa(tipo,cod,razao_social,cnpj,usuario,observacao)
-                VALUES('ALTERAÇÃO','--','--','--',?,'Edição em lote via grade')""", (_NIVEL,))
-            conn.commit()
-            conn.close()
+            # Registra no log o que exatamente mudou
+            _log_alteracoes_empresa(df_antes, df_rev)
             # Sincroniza com Google Sheets
             df_atual = _load("empresas_controle", "ativo=1")
             ok = _sheets_salvar("empresas_controle", df_atual)
-            msg = "✅ Salvo e sincronizado com a planilha!" if ok else "✅ Salvo localmente. (Planilha Google não configurada)"
-            st.success(msg)
+            if ok:
+                st.success("✅ Salvo e sincronizado com a planilha Google!")
+            else:
+                st.success("✅ Salvo localmente.")
+                st.error("❌ Google Sheets não está configurado. Os dados serão perdidos ao reiniciar o servidor. Configure as credenciais conforme instruções abaixo.")
             st.rerun()
 
     with col_d:
