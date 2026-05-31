@@ -6,16 +6,10 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import os
-import re
-import requests
 from datetime import datetime
 from io import BytesIO
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
 from st_aggrid.shared import JsCode
-
-# URL da planilha Google (mesma do Gestor_Fiscal.py)
-_SHEET_URL   = "https://docs.google.com/spreadsheets/d/1bp7qtkKvsMHMvHjGznT6OwyX_YSQWMa3jVvylOJWSxM/export?format=xlsx"
-_SHEET_GERAL = "GERAL"
 
 # ============================================================================
 # CONFIGURAÇÃO
@@ -304,93 +298,6 @@ def _save_grid(df, table):
     conn.close()
 
 
-def _normaliza_cnpj(val):
-    digits = re.sub(r"\D", "", str(val))
-    if len(digits) == 15:
-        digits = digits[:14]
-    return digits.zfill(14)
-
-
-def _importar_empresas_sheets():
-    """Lê a aba GERAL do Google Sheets e importa as empresas ATIVAS para o SQLite."""
-    try:
-        resp = requests.get(_SHEET_URL, timeout=30)
-        resp.raise_for_status()
-        df = pd.read_excel(BytesIO(resp.content), sheet_name=_SHEET_GERAL, engine="openpyxl")
-        df.columns = df.columns.str.strip()
-    except Exception as ex:
-        return 0, f"Erro ao ler a planilha: {ex}"
-
-    if "Situação" not in df.columns:
-        return 0, "Coluna 'Situação' não encontrada na planilha."
-
-    df_ativas = df[df["Situação"].astype(str).str.upper() == "ATIVA"].copy()
-    if df_ativas.empty:
-        return 0, "Nenhuma empresa ATIVA encontrada na planilha."
-
-    # Mapeamento de colunas Google Sheets → empresas_controle
-    mapa = {
-        "Código":         "cod",
-        "Razão Social":   "razao_social",
-        "CNPJ":           "cnpj",
-        "Regime":         "regime",
-        "Matriz / Filial":"matriz_filial",
-        "Insc. Estadual": "ie",
-        "Insc. Municipal":"im",
-        "Estado":         "uf",
-        "Município":      "municipio",
-        "Grupo":          "grupo",
-    }
-
-    conn = get_conn()
-    inseridos = 0
-    ignorados = 0
-    try:
-        for _, row in df_ativas.iterrows():
-            def _v(col):
-                val = row.get(col, "")
-                if pd.isna(val):
-                    return ""
-                s = str(val).strip()
-                return s[:-2] if s.endswith(".0") else s
-
-            cod       = _v("Código")
-            razao     = _v("Razão Social")
-            cnpj      = _normaliza_cnpj(_v("CNPJ"))
-            regime    = _v("Regime")
-            mf        = _v("Matriz / Filial")
-            ie        = _v("Insc. Estadual")
-            im        = _v("Insc. Municipal")
-            uf        = _v("Estado")
-            municipio = _v("Município")
-            grupo     = _v("Grupo")
-
-            cur = conn.execute(
-                "SELECT id FROM empresas_controle WHERE cod=?", (cod,)
-            ).fetchone()
-
-            if cur is None:
-                conn.execute("""
-                INSERT INTO empresas_controle
-                (cod,razao_social,cnpj,regime,matriz_filial,ie,im,uf,municipio,grupo,criado_por)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?)
-                """, (cod, razao, cnpj, regime, mf, ie, im, uf, municipio, grupo, "IMPORTAÇÃO"))
-                conn.execute("""
-                INSERT INTO alteracao_empresa(tipo,cod,razao_social,cnpj,usuario)
-                VALUES('INCLUSÃO',?,?,?,?)
-                """, (cod, razao, cnpj, "IMPORTAÇÃO"))
-                inseridos += 1
-            else:
-                ignorados += 1
-
-        conn.commit()
-    except Exception as ex:
-        conn.close()
-        return 0, f"Erro ao salvar: {ex}"
-    conn.close()
-    return inseridos, f"{inseridos} empresa(s) importada(s). {ignorados} já existia(m) e foram ignorada(s)."
-
-
 def _auto_populate(table, competencia, filtro_fn):
     conn = get_conn()
     existentes = {
@@ -447,11 +354,14 @@ def _inserir_controle(c, table, comp, emp):
          e("uf"), e("municipio"), e("responsavel_fiscal")))
 
 
-def _build_grid(df, edit_cols=None, height=450, key="grid"):
+def _build_grid(df, edit_cols=None, height=450, key="grid", selection=False):
     gb = GridOptionsBuilder.from_dataframe(df)
     gb.configure_default_column(
         resizable=True, filter=True, sortable=True, editable=False, minWidth=100
     )
+    if selection:
+        gb.configure_selection(selection_mode="single", use_checkbox=True)
+
     for col in df.columns:
         if col == "id" or col == "competencia":
             gb.configure_column(col, hide=True)
@@ -473,10 +383,12 @@ def _build_grid(df, edit_cols=None, height=450, key="grid"):
         enableCellTextSelection=True, suppressMenuHide=True,
         localeText={"filterOoo": "Filtrar...", "noRowsToShow": "Nenhum registro"},
     )
+    update_on = ["selectionChanged"] if selection else []
     return AgGrid(
         df, gridOptions=gb.build(), height=height, key=key,
         fit_columns_on_grid_load=False, enable_enterprise_modules=False,
         update_mode=GridUpdateMode.VALUE_CHANGED,
+        update_on=update_on,
         allow_unsafe_jscode=True, reload_data=False,
     )
 
@@ -600,23 +512,9 @@ if st.sidebar.button("Sair", use_container_width=True):
 def pagina_empresas_ctrl():
     st.markdown("<h2 style='color:#1d3f77;'>EMPRESAS</h2>", unsafe_allow_html=True)
 
-    # --- Importar do Google Sheets (só GESTOR) ---
-    if _GESTOR:
-        st.markdown("#### Importar Empresas da Planilha")
-        st.caption("Importa todas as empresas ATIVAS do Google Sheets para este sistema. Empresas já cadastradas são ignoradas automaticamente.")
-        if st.button("📥 Importar do Google Sheets", key="btn_importar_sheets", type="primary"):
-            with st.spinner("Importando..."):
-                qtd, msg = _importar_empresas_sheets()
-            if qtd >= 0:
-                st.success(msg)
-                st.rerun()
-            else:
-                st.error(msg)
-        st.divider()
-
     # --- Adicionar empresa (só GESTOR) ---
     if _GESTOR:
-        with st.expander("➕ Nova Empresa (manual)", expanded=False):
+        with st.expander("➕ Nova Empresa", expanded=False):
             c1, c2, c3 = st.columns(3)
             with c1:
                 n_cod    = st.text_input("Código*", key="ne_cod")
@@ -670,6 +568,30 @@ def pagina_empresas_ctrl():
             st.info("Nenhuma empresa cadastrada.")
         return
 
+    # --- Totalizador ---
+    total   = len(df)
+    simples = (df["regime"].astype(str).str.upper().str.contains("SIMPLES", na=False)).sum()
+    matrizes = (df["matriz_filial"].astype(str).str.upper() == "MATRIZ").sum()
+    filiais  = (df["matriz_filial"].astype(str).str.upper() == "FILIAL").sum()
+
+    c1, c2, c3, c4 = st.columns(4)
+    for col, label, valor, cor in [
+        (c1, "Total de Empresas", total,   "#1d3f77"),
+        (c2, "Simples Nacional",  simples, "#27ae60"),
+        (c3, "Matrizes",          matrizes,"#2980b9"),
+        (c4, "Filiais",           filiais, "#8e44ad"),
+    ]:
+        with col:
+            st.markdown(
+                f"<div style='background:#f4f6fa; border-radius:8px; padding:12px; "
+                f"text-align:center; border-top:3px solid {cor};'>"
+                f"<span style='font-size:11px; color:#777;'>{label}</span><br>"
+                f"<span style='font-size:26px; font-weight:700; color:{cor};'>{valor}</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+    st.markdown("<br>", unsafe_allow_html=True)
+
     COLS = ["id","cod","razao_social","cnpj","regime","matriz_filial",
             "ie","im","uf","municipio","grupo","responsavel_fiscal","observacoes"]
     df_show = df[[c for c in COLS if c in df.columns]].copy().fillna("")
@@ -683,7 +605,8 @@ def pagina_empresas_ctrl():
     df_show = df_show.rename(columns=RENAME)
 
     edit_emp = list(RENAME.values()) if _GESTOR else []
-    resp_grid = _build_grid(df_show, edit_cols=edit_emp, key="grid_emp_ctrl")
+    resp_grid = _build_grid(df_show, edit_cols=edit_emp,
+                            key="grid_emp_ctrl", selection=_GESTOR)
 
     col_s, col_e, col_d = st.columns([1, 1, 3])
     with col_s:
