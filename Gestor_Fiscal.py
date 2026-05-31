@@ -2985,14 +2985,14 @@ def pagina_comparacao_impostos():
         )
     with col_btn:
         st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown("""
-        <button onclick="window.print()"
+        st.components.v1.html("""
+        <button onclick="window.parent.print()"
             style="width:100%; padding:10px 14px; background:#1d3f77; color:white;
                    border:none; border-radius:8px; font-size:14px; font-weight:600;
-                   cursor:pointer; margin-top:6px;">
+                   cursor:pointer;">
             🖨️ Imprimir / PDF
         </button>
-        """, unsafe_allow_html=True)
+        """, height=48)
     st.divider()
 
     # ── Inputs ───────────────────────────────────────────────────────────────
