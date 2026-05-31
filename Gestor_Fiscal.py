@@ -260,7 +260,8 @@ st.sidebar.markdown("<hr style='margin: 8px 0;'>", unsafe_allow_html=True)
 # Define as páginas disponíveis por área
 if st.session_state["menu_area"] == "FISCAL":
     paginas_disponiveis = ["EMPRESAS", "SIMPLES NACIONAL", "REINF", "DCTF WEB",
-                           "DMS", "SERVIÇOS TOMADOS", "SEFAZ", "LEITURA XML DMS", "LEITURA XML REST","SEFAZ COMPARAÇÃO"]
+                           "DMS", "SERVIÇOS TOMADOS", "SEFAZ", "LEITURA XML DMS", "LEITURA XML REST",
+                           "SEFAZ COMPARAÇÃO", "COMPARAÇÃO DE IMPOSTOS"]
 
 elif st.session_state["menu_area"] == "PARALEGAL":
     paginas_disponiveis = ["DASHBOARD", "EMPRESAS", "CND MUNICIPAL", "SEM ACESSO"]
@@ -2859,6 +2860,350 @@ def pagina_sefaz_comparacao():
         st.success("Nenhuma divergência encontrada entre as colunas!")
 
 # ============================================================================
+# COMPARAÇÃO DE IMPOSTOS
+# ============================================================================
+
+_SN_TABELAS = {
+    "I": {
+        "nome": "Anexo I — Comércio",
+        "faixas": [
+            {"limite": 180000,   "aliq": 0.040, "deducao": 0,       "rep": {"IRPJ": 0.055, "CSLL": 0.035, "COFINS": 0.1274, "PIS": 0.0276, "CPP": 0.415,  "ICMS": 0.340}},
+            {"limite": 360000,   "aliq": 0.073, "deducao": 5940,    "rep": {"IRPJ": 0.055, "CSLL": 0.035, "COFINS": 0.1274, "PIS": 0.0276, "CPP": 0.415,  "ICMS": 0.340}},
+            {"limite": 720000,   "aliq": 0.095, "deducao": 13860,   "rep": {"IRPJ": 0.055, "CSLL": 0.035, "COFINS": 0.1274, "PIS": 0.0276, "CPP": 0.420,  "ICMS": 0.335}},
+            {"limite": 1800000,  "aliq": 0.107, "deducao": 22500,   "rep": {"IRPJ": 0.055, "CSLL": 0.035, "COFINS": 0.1274, "PIS": 0.0276, "CPP": 0.420,  "ICMS": 0.335}},
+            {"limite": 3600000,  "aliq": 0.143, "deducao": 87300,   "rep": {"IRPJ": 0.055, "CSLL": 0.035, "COFINS": 0.1274, "PIS": 0.0276, "CPP": 0.420,  "ICMS": 0.335}},
+            {"limite": 4800000,  "aliq": 0.190, "deducao": 378000,  "rep": {"IRPJ": 0.135, "CSLL": 0.100, "COFINS": 0.2827, "PIS": 0.0613, "CPP": 0.421,  "ICMS": 0.000}},
+        ],
+    },
+    "II": {
+        "nome": "Anexo II — Industria",
+        "faixas": [
+            {"limite": 180000,   "aliq": 0.045, "deducao": 0,       "rep": {"IRPJ": 0.055, "CSLL": 0.035, "COFINS": 0.1151, "PIS": 0.0249, "CPP": 0.375, "IPI": 0.075, "ICMS": 0.320}},
+            {"limite": 360000,   "aliq": 0.078, "deducao": 5940,    "rep": {"IRPJ": 0.055, "CSLL": 0.035, "COFINS": 0.1151, "PIS": 0.0249, "CPP": 0.375, "IPI": 0.075, "ICMS": 0.320}},
+            {"limite": 720000,   "aliq": 0.100, "deducao": 13860,   "rep": {"IRPJ": 0.055, "CSLL": 0.035, "COFINS": 0.1151, "PIS": 0.0249, "CPP": 0.375, "IPI": 0.075, "ICMS": 0.320}},
+            {"limite": 1800000,  "aliq": 0.112, "deducao": 22500,   "rep": {"IRPJ": 0.055, "CSLL": 0.035, "COFINS": 0.1151, "PIS": 0.0249, "CPP": 0.375, "IPI": 0.075, "ICMS": 0.320}},
+            {"limite": 3600000,  "aliq": 0.147, "deducao": 85500,   "rep": {"IRPJ": 0.055, "CSLL": 0.035, "COFINS": 0.1151, "PIS": 0.0249, "CPP": 0.375, "IPI": 0.075, "ICMS": 0.320}},
+            {"limite": 4800000,  "aliq": 0.300, "deducao": 720000,  "rep": {"IRPJ": 0.085, "CSLL": 0.075, "COFINS": 0.2096, "PIS": 0.0454, "CPP": 0.235, "IPI": 0.350, "ICMS": 0.000}},
+        ],
+    },
+    "III": {
+        "nome": "Anexo III — Servicos",
+        "faixas": [
+            {"limite": 180000,   "aliq": 0.060, "deducao": 0,       "rep": {"IRPJ": 0.040, "CSLL": 0.035, "COFINS": 0.1282, "PIS": 0.0278, "CPP": 0.434, "ISS": 0.335}},
+            {"limite": 360000,   "aliq": 0.112, "deducao": 9360,    "rep": {"IRPJ": 0.040, "CSLL": 0.035, "COFINS": 0.1405, "PIS": 0.0305, "CPP": 0.434, "ISS": 0.320}},
+            {"limite": 720000,   "aliq": 0.135, "deducao": 17640,   "rep": {"IRPJ": 0.040, "CSLL": 0.035, "COFINS": 0.1364, "PIS": 0.0296, "CPP": 0.434, "ISS": 0.325}},
+            {"limite": 1800000,  "aliq": 0.160, "deducao": 35640,   "rep": {"IRPJ": 0.040, "CSLL": 0.035, "COFINS": 0.1364, "PIS": 0.0296, "CPP": 0.434, "ISS": 0.325}},
+            {"limite": 3600000,  "aliq": 0.210, "deducao": 125640,  "rep": {"IRPJ": 0.040, "CSLL": 0.035, "COFINS": 0.1282, "PIS": 0.0278, "CPP": 0.434, "ISS": 0.335}},
+            {"limite": 4800000,  "aliq": 0.330, "deducao": 648000,  "rep": {"IRPJ": 0.350, "CSLL": 0.150, "COFINS": 0.1603, "PIS": 0.0347, "CPP": 0.305, "ISS": 0.000}},
+        ],
+    },
+    "IV": {
+        "nome": "Anexo IV — Servicos (sem CPP)",
+        "faixas": [
+            {"limite": 180000,   "aliq": 0.045, "deducao": 0,       "rep": {"IRPJ": 0.188, "CSLL": 0.152, "COFINS": 0.1767, "PIS": 0.0383, "ISS": 0.445}},
+            {"limite": 360000,   "aliq": 0.090, "deducao": 8100,    "rep": {"IRPJ": 0.198, "CSLL": 0.152, "COFINS": 0.2055, "PIS": 0.0445, "ISS": 0.400}},
+            {"limite": 720000,   "aliq": 0.102, "deducao": 12420,   "rep": {"IRPJ": 0.208, "CSLL": 0.152, "COFINS": 0.1973, "PIS": 0.0427, "ISS": 0.400}},
+            {"limite": 1800000,  "aliq": 0.140, "deducao": 39780,   "rep": {"IRPJ": 0.178, "CSLL": 0.192, "COFINS": 0.1890, "PIS": 0.0410, "ISS": 0.400}},
+            {"limite": 3600000,  "aliq": 0.220, "deducao": 183780,  "rep": {"IRPJ": 0.188, "CSLL": 0.192, "COFINS": 0.1808, "PIS": 0.0392, "ISS": 0.400}},
+            {"limite": 4800000,  "aliq": 0.330, "deducao": 828000,  "rep": {"IRPJ": 0.535, "CSLL": 0.215, "COFINS": 0.2055, "PIS": 0.0445, "ISS": 0.000}},
+        ],
+    },
+    "V": {
+        "nome": "Anexo V — Servicos (com CPP)",
+        "faixas": [
+            {"limite": 180000,   "aliq": 0.155, "deducao": 0,       "rep": {"IRPJ": 0.250, "CSLL": 0.150, "COFINS": 0.1410, "PIS": 0.0305, "CPP": 0.2885, "ISS": 0.140}},
+            {"limite": 360000,   "aliq": 0.180, "deducao": 4500,    "rep": {"IRPJ": 0.230, "CSLL": 0.150, "COFINS": 0.1410, "PIS": 0.0305, "CPP": 0.2785, "ISS": 0.170}},
+            {"limite": 720000,   "aliq": 0.195, "deducao": 9900,    "rep": {"IRPJ": 0.240, "CSLL": 0.150, "COFINS": 0.1492, "PIS": 0.0323, "CPP": 0.2385, "ISS": 0.190}},
+            {"limite": 1800000,  "aliq": 0.205, "deducao": 17100,   "rep": {"IRPJ": 0.210, "CSLL": 0.150, "COFINS": 0.1574, "PIS": 0.0341, "CPP": 0.2385, "ISS": 0.210}},
+            {"limite": 3600000,  "aliq": 0.230, "deducao": 62100,   "rep": {"IRPJ": 0.230, "CSLL": 0.125, "COFINS": 0.1410, "PIS": 0.0305, "CPP": 0.2385, "ISS": 0.235}},
+            {"limite": 4800000,  "aliq": 0.305, "deducao": 540000,  "rep": {"IRPJ": 0.350, "CSLL": 0.155, "COFINS": 0.1644, "PIS": 0.0356, "CPP": 0.295,  "ISS": 0.000}},
+        ],
+    },
+}
+
+
+def _fmtbrl(v):
+    return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def _calc_simples_nacional(faturamento_mes, rbt12, anexo):
+    faixas = _SN_TABELAS[anexo]["faixas"]
+    if rbt12 > 4800000:
+        return None, "RBT12 acima do limite do Simples Nacional (R$ 4.800.000,00)"
+    faixa_idx = len(faixas) - 1
+    for i, f in enumerate(faixas):
+        if rbt12 <= f["limite"]:
+            faixa_idx = i
+            break
+    faixa = faixas[faixa_idx]
+    aliq_ef = (rbt12 * faixa["aliq"] - faixa["deducao"]) / rbt12 if rbt12 > 0 else faixa["aliq"]
+    total = faturamento_mes * aliq_ef
+    detalhes = {k: total * v for k, v in faixa["rep"].items()}
+    detalhes["_aliq_ef"] = aliq_ef
+    detalhes["_faixa"]   = faixa_idx + 1
+    detalhes["_total"]   = total
+    return detalhes, None
+
+
+def pagina_comparacao_impostos():
+    import plotly.graph_objects as go
+    st.empty()
+
+    st.markdown("<h2 style='color:#1d3f77;'>COMPARACAO DE IMPOSTOS</h2>", unsafe_allow_html=True)
+    st.markdown(
+        "<p style='color:#666;'>Simulacao comparativa entre regimes tributarios. "
+        "Valores estimados para fins de planejamento — consulte um profissional contabil.</p>",
+        unsafe_allow_html=True,
+    )
+    st.divider()
+
+    # ── Inputs ───────────────────────────────────────────────────────────────
+    st.markdown("### Dados da Simulacao")
+
+    col_fat, col_ane = st.columns([2, 1])
+    with col_fat:
+        st.markdown(
+            "<div style='background:#1d3f77; border-radius:10px 10px 0 0; padding:10px 16px;'>"
+            "<span style='color:rgba(255,255,255,0.85); font-size:13px; font-weight:600;'>"
+            "Faturamento Mensal (R$)</span></div>",
+            unsafe_allow_html=True,
+        )
+        faturamento = st.number_input(
+            "fat", min_value=0.0, value=50000.0, step=1000.0, format="%.2f",
+            label_visibility="collapsed", key="comp_faturamento",
+        )
+    with col_ane:
+        _opcoes_anexo = {
+            "I":   "Anexo I - Comercio",
+            "II":  "Anexo II - Industria",
+            "III": "Anexo III - Servicos",
+            "IV":  "Anexo IV - Servicos (sem CPP)",
+            "V":   "Anexo V - Servicos (com CPP)",
+        }
+        anexo = st.selectbox(
+            "Anexo do Simples Nacional",
+            options=list(_opcoes_anexo.keys()),
+            format_func=lambda x: _opcoes_anexo[x],
+            key="comp_anexo",
+        )
+
+    usa_iss  = anexo in ("III", "IV", "V")
+    usa_icms = anexo in ("I", "II")
+    rbt12    = faturamento * 12
+
+    col_i1, col_i2, col_i3 = st.columns(3)
+    aliq_iss = aliq_icms = valor_compras = 0.0
+
+    with col_i1:
+        if usa_iss:
+            aliq_iss = st.slider(
+                "Aliquota ISS (%)", min_value=2.0, max_value=5.0,
+                value=3.0, step=0.5, key="comp_iss",
+            ) / 100
+        else:
+            aliq_icms = st.slider(
+                "Aliquota ICMS (%)", min_value=0.0, max_value=19.0,
+                value=12.0, step=1.0, key="comp_icms",
+            ) / 100
+
+    with col_i2:
+        valor_compras = st.number_input(
+            "Valor das Compras/Custos (R$)", min_value=0.0,
+            value=0.0, step=500.0, format="%.2f", key="comp_compras",
+        )
+
+    with col_i3:
+        st.markdown(
+            f"<div style='background:#f4f6fa; border-radius:8px; padding:14px; text-align:center; margin-top:4px;'>"
+            f"<span style='font-size:12px; color:#777;'>RBT12 (Faturamento x 12)</span><br>"
+            f"<span style='font-size:20px; font-weight:700; color:#1d3f77;'>{_fmtbrl(rbt12)}</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    st.divider()
+
+    # ── Calculos ─────────────────────────────────────────────────────────────
+    sn, sn_erro = _calc_simples_nacional(faturamento, rbt12, anexo)
+
+    def _calc_lp(presuncao_irpj, presuncao_csll):
+        base_irpj = faturamento * presuncao_irpj
+        base_csll = faturamento * presuncao_csll
+        irpj      = base_irpj * 0.15
+        irpj_adic = max(base_irpj - 20000, 0) * 0.10
+        csll      = base_csll * 0.09
+        pis       = faturamento * 0.0065
+        cofins    = faturamento * 0.03
+        iss_v     = faturamento * aliq_iss if usa_iss else None
+        icms_v    = (faturamento - valor_compras) * aliq_icms if usa_icms else None
+        total     = irpj + irpj_adic + csll + pis + cofins + (iss_v or 0) + (icms_v or 0)
+        return {"IRPJ": irpj, "IRPJ Adic.": irpj_adic, "CSLL": csll,
+                "PIS": pis, "COFINS": cofins, "ISS": iss_v, "ICMS": icms_v, "_total": total}
+
+    lp_serv = _calc_lp(0.32, 0.32)
+    lp_com  = _calc_lp(0.08, 0.12)
+
+    lucro_base = max(faturamento - valor_compras, 0)
+    lr = {
+        "IRPJ":        lucro_base * 0.15,
+        "IRPJ Adic.":  max(lucro_base - 20000, 0) * 0.10,
+        "CSLL":        lucro_base * 0.09,
+        "PIS":         faturamento * 0.0165,
+        "COFINS":      faturamento * 0.076,
+        "ISS":         faturamento * aliq_iss if usa_iss else None,
+        "ICMS":        (faturamento - valor_compras) * aliq_icms if usa_icms else None,
+    }
+    lr["_total"] = sum(v for k, v in lr.items() if not k.startswith("_") and v is not None)
+
+    # ── Cards de resultado ────────────────────────────────────────────────────
+    st.markdown("### Resultado da Simulacao")
+
+    def _linha(nome, valor):
+        if valor is None or valor < 0.001:
+            return ""
+        return (
+            f"<div style='display:flex; justify-content:space-between; padding:6px 12px;"
+            f" border-bottom:1px solid #f0f0f0;'>"
+            f"<span style='font-size:13px; color:#444;'>{nome}</span>"
+            f"<span style='font-size:13px; font-weight:600; color:#222;'>{_fmtbrl(valor)}</span>"
+            f"</div>"
+        )
+
+    def _header_card(titulo, sub, cor):
+        return (
+            f"<div style='background:{cor}; border-radius:8px 8px 0 0; padding:12px 14px;'>"
+            f"<span style='font-size:15px; font-weight:700; color:white;'>{titulo}</span><br>"
+            f"<span style='font-size:11px; color:rgba(255,255,255,0.8);'>{sub}</span></div>"
+        )
+
+    def _rodape_card(valor, cor):
+        return (
+            f"<div style='display:flex; justify-content:space-between; padding:10px 12px;"
+            f" background:{cor}; border-radius:0 0 8px 8px; margin-top:2px;'>"
+            f"<span style='font-size:14px; font-weight:700; color:white;'>TOTAL</span>"
+            f"<span style='font-size:16px; font-weight:700; color:white;'>{_fmtbrl(valor)}</span>"
+            f"</div>"
+        )
+
+    def _montar_card(header, linhas, rodape, cor_borda):
+        return (
+            f"<div style='border:1px solid {cor_borda}; border-radius:8px;"
+            f" overflow:hidden; margin-bottom:8px;'>{header}{linhas}{rodape}</div>"
+        )
+
+    col_sn, col_lp1, col_lp2, col_lr = st.columns(4)
+
+    with col_sn:
+        if sn_erro:
+            st.error(f"Simples Nacional: {sn_erro}")
+        else:
+            aliq_pct = sn["_aliq_ef"] * 100
+            linhas   = "".join(
+                _linha(k, v) for k, v in sn.items()
+                if not k.startswith("_") and isinstance(v, float) and v > 0.001
+            )
+            st.markdown(
+                _montar_card(
+                    _header_card("Simples Nacional",
+                                 f"{_opcoes_anexo[anexo]} | Faixa {sn['_faixa']} | Aliq. ef.: {aliq_pct:.2f}%",
+                                 "#27ae60"),
+                    linhas,
+                    _rodape_card(sn["_total"], "#1e8449"),
+                    "#27ae60",
+                ),
+                unsafe_allow_html=True,
+            )
+
+    with col_lp1:
+        linhas = "".join(
+            _linha(k, v) for k, v in lp_serv.items()
+            if not k.startswith("_") and v is not None and v > 0.001
+        )
+        st.markdown(
+            _montar_card(
+                _header_card("Lucro Presumido", "Presuncao 32% CSLL / 32% IRPJ", "#e67e22"),
+                linhas, _rodape_card(lp_serv["_total"], "#ca6f1e"), "#e67e22",
+            ),
+            unsafe_allow_html=True,
+        )
+
+    with col_lp2:
+        linhas = "".join(
+            _linha(k, v) for k, v in lp_com.items()
+            if not k.startswith("_") and v is not None and v > 0.001
+        )
+        st.markdown(
+            _montar_card(
+                _header_card("Lucro Presumido", "Presuncao 8% IRPJ / 12% CSLL", "#2980b9"),
+                linhas, _rodape_card(lp_com["_total"], "#1a5276"), "#2980b9",
+            ),
+            unsafe_allow_html=True,
+        )
+
+    with col_lr:
+        linhas = "".join(
+            _linha(k, v) for k, v in lr.items()
+            if not k.startswith("_") and v is not None and v > 0.001
+        )
+        st.markdown(
+            _montar_card(
+                _header_card("Lucro Real",
+                             f"Base: Receita - Compras = {_fmtbrl(lucro_base)}", "#8e44ad"),
+                linhas, _rodape_card(lr["_total"], "#6c3483"), "#8e44ad",
+            ),
+            unsafe_allow_html=True,
+        )
+
+    # ── Grafico comparativo ───────────────────────────────────────────────────
+    st.divider()
+    st.markdown("### Resumo Comparativo")
+
+    regimes = []
+    if not sn_erro:
+        regimes.append(("Simples Nacional", sn["_total"],       "#27ae60"))
+    regimes.append(("LP 32%/32%",       lp_serv["_total"],  "#e67e22"))
+    regimes.append(("LP 8%/12%",        lp_com["_total"],   "#2980b9"))
+    regimes.append(("Lucro Real",       lr["_total"],       "#8e44ad"))
+
+    regimes_ord = sorted(regimes, key=lambda x: x[1])
+
+    fig_comp = go.Figure(data=[go.Bar(
+        x=[r[0] for r in regimes_ord],
+        y=[r[1] for r in regimes_ord],
+        marker_color=[r[2] for r in regimes_ord],
+        text=[_fmtbrl(r[1]) for r in regimes_ord],
+        textposition="outside",
+        hovertemplate="<b>%{x}</b><br>Total: %{text}<extra></extra>",
+    )])
+    fig_comp.update_layout(
+        plot_bgcolor="white", paper_bgcolor="white",
+        xaxis=dict(title="", showgrid=False),
+        yaxis=dict(title="Total de Impostos (R$)", showgrid=True,
+                   gridcolor="#f0f0f0", zeroline=False),
+        margin=dict(t=40, b=20, l=10, r=10),
+        height=360,
+        showlegend=False,
+    )
+    st.plotly_chart(fig_comp, use_container_width=True, key="chart_comp_impostos")
+
+    if faturamento > 0:
+        df_res = pd.DataFrame([
+            {
+                "Regime":              r[0],
+                "Total de Impostos":   _fmtbrl(r[1]),
+                "% sobre Faturamento": f"{r[1] / faturamento * 100:.2f}%",
+            }
+            for r in regimes_ord
+        ])
+        st.dataframe(df_res, use_container_width=True, hide_index=True)
+
+    st.caption(
+        "Fonte: LC 123/2006 — tabelas vigentes desde 01/01/2018. "
+        "Simulacao estimada para fins de planejamento tributario."
+    )
+
+
+# ============================================================================
 # ROTEAMENTO
 # ============================================================================
 
@@ -2888,4 +3233,6 @@ with st.session_state.main_container.container():
     elif pagina == "SEM ACESSO":
         pagina_sem_acesso()
     elif pagina == "SEFAZ COMPARAÇÃO":
-        pagina_sefaz_comparacao()    
+        pagina_sefaz_comparacao()
+    elif pagina == "COMPARAÇÃO DE IMPOSTOS":
+        pagina_comparacao_impostos()
