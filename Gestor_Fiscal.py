@@ -173,6 +173,9 @@ def exibe_aggrid_com_oculta(df, height=400, grid_key="grid", selection_mode='non
 if "autenticado" not in st.session_state:
     st.session_state["autenticado"] = False
 
+if "nivel_acesso" not in st.session_state:
+    st.session_state["nivel_acesso"] = None
+
 # Controle da área principal do menu
 if "menu_area" not in st.session_state:
     st.session_state["menu_area"] = None
@@ -183,6 +186,15 @@ def tela_login():
     if st.button("Entrar"):
         if senha == "VIDAL":
             st.session_state["autenticado"] = True
+            st.session_state["nivel_acesso"] = "VIDAL"
+        elif senha == "GESTOR":
+            st.session_state["autenticado"] = True
+            st.session_state["nivel_acesso"] = "GESTOR"
+            st.rerun()
+        elif senha == "FISCAL":
+            st.session_state["autenticado"] = True
+            st.session_state["nivel_acesso"] = "FISCAL"
+            st.switch_page("pages/Controle_Fiscal.py")
         else:
             st.error("Senha incorreta.")
 
@@ -231,6 +243,41 @@ def tela_menu_principal():
             st.session_state["pagina_atual"] = "EMPRESAS"
             st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
+
+    # ── Seção Controle ─────────────────────────────────────────────────────
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown("<hr style='border:1px solid #ddd; margin:10px 0;'>", unsafe_allow_html=True)
+    st.markdown("<h2 style='text-align:center; color:#1d3f77; margin-bottom:10px;'>Selecione o Controle</h2>",
+                unsafe_allow_html=True)
+
+    col_ctrl = st.columns([1, 2, 1])[1]
+    with col_ctrl:
+        nivel = st.session_state.get("nivel_acesso", "VIDAL")
+        if nivel in ("GESTOR", "FISCAL"):
+            st.markdown('<div class="menu-btn">', unsafe_allow_html=True)
+            if st.button("DEPARTAMENTO FISCAL", use_container_width=True, key="btn_controle"):
+                st.switch_page("pages/Controle_Fiscal.py")
+            st.markdown('</div>', unsafe_allow_html=True)
+        else:
+            st.markdown("""
+            <div style='background:#f4f6fa; border:2px dashed #bdc3c7; border-radius:12px;
+                        padding:20px; text-align:center; color:#7f8c8d;'>
+                <span style='font-size:18px;'>DEPARTAMENTO FISCAL</span><br>
+                <span style='font-size:13px;'>Acesso restrito — use senha GESTOR ou FISCAL</span>
+            </div>
+            """, unsafe_allow_html=True)
+            st.markdown("<br>", unsafe_allow_html=True)
+            senha_ctrl = st.text_input("Senha de Acesso ao Controle", type="password",
+                                       key="ctrl_senha_main", placeholder="GESTOR ou FISCAL")
+            if st.button("Acessar Controle", key="btn_ctrl_login", use_container_width=True):
+                if senha_ctrl == "GESTOR":
+                    st.session_state["nivel_acesso"] = "GESTOR"
+                    st.switch_page("pages/Controle_Fiscal.py")
+                elif senha_ctrl == "FISCAL":
+                    st.session_state["nivel_acesso"] = "FISCAL"
+                    st.switch_page("pages/Controle_Fiscal.py")
+                else:
+                    st.error("Senha incorreta. Use GESTOR ou FISCAL.")
 
 if st.session_state["menu_area"] is None:
     tela_menu_principal()
