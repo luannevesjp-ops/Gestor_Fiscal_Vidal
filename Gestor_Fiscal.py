@@ -2949,12 +2949,50 @@ def pagina_comparacao_impostos():
     import plotly.graph_objects as go
     st.empty()
 
-    st.markdown("<h2 style='color:#1d3f77;'>COMPARACAO DE IMPOSTOS</h2>", unsafe_allow_html=True)
-    st.markdown(
-        "<p style='color:#666;'>Simulacao comparativa entre regimes tributarios. "
-        "Valores estimados para fins de planejamento — consulte um profissional contabil.</p>",
-        unsafe_allow_html=True,
-    )
+    # CSS de impressão: oculta sidebar e controles do Streamlit, exibe só o conteúdo
+    st.markdown("""
+    <style>
+    @media print {
+        [data-testid="stSidebar"],
+        [data-testid="stToolbar"],
+        [data-testid="stDecoration"],
+        [data-testid="stHeader"],
+        header, footer,
+        .stDeployButton,
+        #MainMenu,
+        .stAppViewBlockContainer > div:first-child > div:first-child > div:first-child > div:first-child > div:first-child {
+            display: none !important;
+        }
+        [data-testid="stAppViewContainer"] > .main {
+            margin-left: 0 !important;
+            padding-left: 1rem !important;
+        }
+        .block-container {
+            padding-top: 1rem !important;
+        }
+        .stButton { display: none !important; }
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    col_titulo, col_btn = st.columns([5, 1])
+    with col_titulo:
+        st.markdown("<h2 style='color:#1d3f77;'>COMPARACAO DE IMPOSTOS</h2>", unsafe_allow_html=True)
+        st.markdown(
+            "<p style='color:#666;'>Simulacao comparativa entre regimes tributarios. "
+            "Valores estimados para fins de planejamento.</p>",
+            unsafe_allow_html=True,
+        )
+    with col_btn:
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("""
+        <button onclick="window.print()"
+            style="width:100%; padding:10px 14px; background:#1d3f77; color:white;
+                   border:none; border-radius:8px; font-size:14px; font-weight:600;
+                   cursor:pointer; margin-top:6px;">
+            🖨️ Imprimir / PDF
+        </button>
+        """, unsafe_allow_html=True)
     st.divider()
 
     # ── Inputs ───────────────────────────────────────────────────────────────
