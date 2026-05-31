@@ -194,7 +194,8 @@ def tela_login():
         elif senha == "FISCAL":
             st.session_state["autenticado"] = True
             st.session_state["nivel_acesso"] = "FISCAL"
-            st.switch_page("pages/Controle_Fiscal.py")
+            st.session_state["ir_controle"] = True
+            st.rerun()
         else:
             st.error("Senha incorreta.")
 
@@ -256,28 +257,39 @@ def tela_menu_principal():
         if nivel in ("GESTOR", "FISCAL"):
             st.markdown('<div class="menu-btn">', unsafe_allow_html=True)
             if st.button("DEPARTAMENTO FISCAL", use_container_width=True, key="btn_controle"):
-                st.switch_page("pages/Controle_Fiscal.py")
+                st.session_state["ir_controle"] = True
+                st.rerun()
             st.markdown('</div>', unsafe_allow_html=True)
         else:
             st.markdown("""
             <div style='background:#f4f6fa; border:2px dashed #bdc3c7; border-radius:12px;
                         padding:20px; text-align:center; color:#7f8c8d;'>
                 <span style='font-size:18px;'>DEPARTAMENTO FISCAL</span><br>
-                <span style='font-size:13px;'>Acesso restrito — use senha GESTOR ou FISCAL</span>
+                <span style='font-size:13px;'>Acesso restrito</span>
             </div>
             """, unsafe_allow_html=True)
             st.markdown("<br>", unsafe_allow_html=True)
             senha_ctrl = st.text_input("Senha de Acesso ao Controle", type="password",
-                                       key="ctrl_senha_main", placeholder="GESTOR ou FISCAL")
+                                       key="ctrl_senha_main")
             if st.button("Acessar Controle", key="btn_ctrl_login", use_container_width=True):
                 if senha_ctrl == "GESTOR":
                     st.session_state["nivel_acesso"] = "GESTOR"
-                    st.switch_page("pages/Controle_Fiscal.py")
+                    st.session_state["ir_controle"] = True
+                    st.rerun()
                 elif senha_ctrl == "FISCAL":
                     st.session_state["nivel_acesso"] = "FISCAL"
-                    st.switch_page("pages/Controle_Fiscal.py")
+                    st.session_state["ir_controle"] = True
+                    st.rerun()
                 else:
-                    st.error("Senha incorreta. Use GESTOR ou FISCAL.")
+                    st.error("Senha incorreta.")
+
+if st.session_state.get("ir_controle"):
+    st.session_state["ir_controle"] = False
+    try:
+        st.switch_page("pages/Controle_Fiscal.py")
+    except Exception:
+        st.session_state["menu_area"] = "CONTROLE"
+        st.rerun()
 
 if st.session_state["menu_area"] is None:
     tela_menu_principal()

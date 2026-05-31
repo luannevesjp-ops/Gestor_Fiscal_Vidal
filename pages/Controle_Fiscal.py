@@ -24,8 +24,19 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+import tempfile
+
 _PROJ_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DB_PATH   = os.path.join(_PROJ_DIR, "controle_fiscal.db")
+_DB_LOCAL = os.path.join(_PROJ_DIR, "controle_fiscal.db")
+
+# No Streamlit Cloud a pasta do projeto é somente leitura — usa /tmp como fallback
+try:
+    _teste = os.path.join(_PROJ_DIR, ".write_test")
+    open(_teste, "w").close()
+    os.remove(_teste)
+    DB_PATH = _DB_LOCAL
+except (IOError, OSError):
+    DB_PATH = os.path.join(tempfile.gettempdir(), "controle_fiscal.db")
 
 # ============================================================================
 # BANCO DE DADOS
