@@ -236,12 +236,6 @@ def init_db():
 
 init_db()
 
-# Restaura do Sheets apenas UMA vez por sessão
-if "db_restaurado" not in st.session_state:
-    for _tbl in _ABA.keys():
-        _restaurar_se_vazio(_tbl)
-    st.session_state["db_restaurado"] = True
-
 # ============================================================================
 # AUTENTICAÇÃO
 # ============================================================================
@@ -280,7 +274,21 @@ check_auth()
 _NIVEL = st.session_state.get("nivel_acesso", "FISCAL")
 _GESTOR = _NIVEL == "GESTOR"
 
-
+# ── TESTE TEMPORÁRIO (remova depois) ─────────────────────────────────────────
+if st.sidebar.button("🔧 Testar Sheets", key="teste_sheets"):
+    url = _script_url() if '_script_url' in dir() else str(st.secrets.get("SCRIPT_URL", ""))
+    token = str(st.secrets.get("SCRIPT_TOKEN", ""))
+    st.sidebar.write(f"URL: `{url[:60]}...`" if url else "❌ URL vazia!")
+    st.sidebar.write(f"Token: `{token}`" if token else "❌ Token vazio!")
+    if url:
+        try:
+            r = requests.post(url,
+                json={"token": token, "aba": "TESTE", "dados": [["col1","col2"],["ok","123"]]},
+                allow_redirects=True, timeout=15)
+            st.sidebar.write(f"Status HTTP: {r.status_code}")
+            st.sidebar.write(f"Resposta: {r.text[:200]}")
+        except Exception as ex:
+            st.sidebar.error(f"Erro: {ex}")
 
 # ============================================================================
 # HELPERS
@@ -388,6 +396,12 @@ def _sincronizar_sheets(table_name):
             pass
     threading.Thread(target=_enviar, daemon=True).start()
 
+
+# Restaura do Sheets apenas UMA vez por sessão
+if "db_restaurado" not in st.session_state:
+    for _tbl in _ABA.keys():
+        _restaurar_se_vazio(_tbl)
+    st.session_state["db_restaurado"] = True
 
 
 def _normaliza_cnpj(val):
@@ -531,10 +545,11 @@ def _importar_empresas_sheets():
 
 
 def _auto_populate(table, competencia, filtro_fn):
+    # Roda apenas uma vez por tabela/competência por sessão
     cache_key = f"populated_{table}_{competencia}"
     if cache_key in st.session_state:
-        return  # já populou nessa sessão
-
+        return
+    st.session_state[cache_key] = True
     conn = get_conn()
     existentes = {
         r[0] for r in conn.execute(
@@ -546,12 +561,10 @@ def _auto_populate(table, competencia, filtro_fn):
     )
     conn.close()
     if df_emp.empty:
-        st.session_state[cache_key] = True
         return
     novas = filtro_fn(df_emp)
     novas = novas[~novas["cod"].isin(existentes)]
     if novas.empty:
-        st.session_state[cache_key] = True
         return
     conn = get_conn()
     c = conn.cursor()
@@ -559,9 +572,6 @@ def _auto_populate(table, competencia, filtro_fn):
         _inserir_controle(c, table, competencia, emp)
     conn.commit()
     conn.close()
-    _sincronizar_sheets(table)
-
-    st.session_state[cache_key] = True
 
 
 def _inserir_controle(c, table, comp, emp):
@@ -625,9 +635,9 @@ def _build_grid(df, edit_cols=None, height=450, key="grid", selection=False):
         localeText={"filterOoo": "Filtrar...", "noRowsToShow": "Nenhum registro"},
     )
     if selection:
-        mode = GridUpdateMode.MANUAL | GridUpdateMode.SELECTION_CHANGED
+        mode = GridUpdateMode.VALUE_CHANGED | GridUpdateMode.SELECTION_CHANGED
     else:
-        mode = GridUpdateMode.MANUAL
+        mode = GridUpdateMode.VALUE_CHANGED
     return AgGrid(
         df, gridOptions=gb.build(), height=height, key=key,
         fit_columns_on_grid_load=False, enable_enterprise_modules=False,
