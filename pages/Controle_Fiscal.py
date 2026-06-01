@@ -1363,8 +1363,6 @@ def pagina_alteracao():
     st.markdown("<p style='color:#666;'>Registro automático de todas as inclusões e exclusões de empresas.</p>",
                 unsafe_allow_html=True)
 
-    # Restaura do Sheets se o SQLite estiver vazio
-    _restaurar_se_vazio("alteracao_empresa")
     df = _load("alteracao_empresa")
     if df.empty:
         st.info("Nenhuma alteração registrada.")
