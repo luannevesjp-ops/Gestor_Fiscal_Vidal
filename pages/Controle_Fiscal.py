@@ -26,7 +26,7 @@ _ABA = {
     "controle_simples":   "SIMPLES NACIONAL",
     "parcelamentos":      "PARCELAMENTOS",
     "senhas_acessos":     "SENHAS E ACESSOS",
-    "alteracao_empresa":  "ALTERAÇÃO DE EMPRESA",
+    "alteracao_empresa":  "ALTERACAO DE EMPRESA",
     "obrigacoes_prazos":  "OBRIGAÇÕES E PRAZOS",
 }
 
