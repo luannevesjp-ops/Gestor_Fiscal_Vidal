@@ -616,9 +616,9 @@ def _build_grid(df, edit_cols=None, height=450, key="grid", selection=False):
         localeText={"filterOoo": "Filtrar...", "noRowsToShow": "Nenhum registro"},
     )
     if selection:
-        mode = GridUpdateMode.VALUE_CHANGED | GridUpdateMode.SELECTION_CHANGED
+        mode = GridUpdateMode.MANUAL | GridUpdateMode.SELECTION_CHANGED
     else:
-        mode = GridUpdateMode.VALUE_CHANGED
+        mode = GridUpdateMode.MANUAL
     return AgGrid(
         df, gridOptions=gb.build(), height=height, key=key,
         fit_columns_on_grid_load=False, enable_enterprise_modules=False,
