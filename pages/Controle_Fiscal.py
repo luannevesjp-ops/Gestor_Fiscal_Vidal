@@ -466,23 +466,18 @@ def _log_alteracoes_empresa(df_antes, df_depois):
             if v_a != v_n:
                 diffs.append(f"{nome}: '{v_a}' -> '{v_n}'")
         if diffs:
-            try:
-                conn.execute("""
-                    INSERT INTO alteracao_empresa
-                        (tipo, cod, razao_social, cnpj, usuario, observacao)
-                    VALUES ('ALTERACAO', ?, ?, ?, ?, ?)
-                """, (str(row_a.get("cod", "")),
-                      str(row_a.get("razao_social", "")),
-                      str(row_a.get("cnpj", "")),
-                      str(_NIVEL),
-                      " | ".join(diffs)))
-            except Exception:
-                pass
-    try:
-        conn.commit()
-    except Exception:
-        pass
+            conn.execute("""
+                INSERT INTO alteracao_empresa
+                    (tipo, cod, razao_social, cnpj, usuario, observacao)
+                VALUES ('ALTERACAO', ?, ?, ?, ?, ?)
+            """, (str(row_a.get("cod", "")),
+                  str(row_a.get("razao_social", "")),
+                  str(row_a.get("cnpj", "")),
+                  str(_NIVEL),
+                  " | ".join(diffs)))
+    conn.commit()
     conn.close()
+    _sincronizar_sheets("alteracao_empresa")
 
 
 def _importar_empresas_sheets():
@@ -1363,6 +1358,9 @@ def pagina_alteracao():
     st.markdown("<p style='color:#666;'>Registro automático de todas as inclusões e exclusões de empresas.</p>",
                 unsafe_allow_html=True)
 
+    # Sempre restaura do Sheets se vazio
+    if _load("alteracao_empresa").empty:
+        _sheets_restaurar("alteracao_empresa")
     df = _load("alteracao_empresa")
     if df.empty:
         st.info("Nenhuma alteração registrada.")
