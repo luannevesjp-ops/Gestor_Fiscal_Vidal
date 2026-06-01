@@ -349,16 +349,38 @@ def _sheets_carregar(table_name):
 
 
 def _sheets_restaurar(table_name):
+
     df = _sheets_carregar(table_name)
+
     if df.empty:
         return False
+
     conn = get_conn()
+
     try:
-        df.to_sql(table_name, conn, if_exists="replace", index=False)
+
+        # LIMPA somente os dados
+        conn.execute(f"DELETE FROM {table_name}")
+
+        # INSERE preservando estrutura original
+        df.to_sql(
+            table_name,
+            conn,
+            if_exists="append",
+            index=False
+        )
+
+        conn.commit()
         conn.close()
+
         return True
-    except Exception:
+
+    except Exception as ex:
+
+        print(f"Erro restaurar {table_name}: {ex}")
+
         conn.close()
+
         return False
 
 
