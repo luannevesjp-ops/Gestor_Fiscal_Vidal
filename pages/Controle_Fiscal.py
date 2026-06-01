@@ -290,22 +290,6 @@ check_auth()
 _NIVEL = st.session_state.get("nivel_acesso", "FISCAL")
 _GESTOR = _NIVEL == "GESTOR"
 
-# ── TESTE TEMPORÁRIO (remova depois) ─────────────────────────────────────────
-if st.sidebar.button("🔧 Testar Sheets", key="teste_sheets"):
-    url = _script_url() if '_script_url' in dir() else str(st.secrets.get("SCRIPT_URL", ""))
-    token = str(st.secrets.get("SCRIPT_TOKEN", ""))
-    st.sidebar.write(f"URL: `{url[:60]}...`" if url else "❌ URL vazia!")
-    st.sidebar.write(f"Token: `{token}`" if token else "❌ Token vazio!")
-    if url:
-        try:
-            r = requests.post(url,
-                json={"token": token, "aba": "TESTE", "dados": [["col1","col2"],["ok","123"]]},
-                allow_redirects=True, timeout=15)
-            st.sidebar.write(f"Status HTTP: {r.status_code}")
-            st.sidebar.write(f"Resposta: {r.text[:200]}")
-        except Exception as ex:
-            st.sidebar.error(f"Erro: {ex}")
-
 # ============================================================================
 # HELPERS
 # ============================================================================
@@ -1414,7 +1398,8 @@ def pagina_alteracao():
     col_s, col_d = st.columns([1, 3])
     with col_s:
         if st.button("☁️ Sincronizar com Sheets", type="primary", key="sync_alt_emp"):
-            ok = _sheets_salvar("alteracao_empresa", df_show)
+            df_alt_full = _load("alteracao_empresa")
+            ok = _sheets_salvar("alteracao_empresa", df_alt_full)
             if ok:
                 st.success("✅ Sincronizado com sucesso!")
             else:
