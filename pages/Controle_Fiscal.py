@@ -13,15 +13,22 @@ from io import BytesIO
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
 from st_aggrid.shared import JsCode
 
-# URL da planilha Google (para leitura e importação)
+# ── Planilha de importação (somente leitura) ─────────────────────────────────
 _SHEET_URL   = "https://docs.google.com/spreadsheets/d/1bp7qtkKvsMHMvHjGznT6OwyX_YSQWMa3jVvylOJWSxM/export?format=xlsx"
 _SHEET_GERAL = "GERAL"
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
 
-# ── ID da planilha Google (para backup persistente) ───────────────────────────
-_SPREADSHEET_ID = "1bp7qtkKvsMHMvHjGznT6OwyX_YSQWMa3jVvylOJWSxM"
-_SHEET_BACKUP   = "SALVAMENTO CONTROLE"
+# ── Mapeamento tabela SQLite → aba da planilha de backup ─────────────────────
+_ABA = {
+    "empresas_controle":  "EMPRESAS",
+    "controle_municipal": "MUNICIPAL",
+    "controle_estadual":  "ESTADUAL",
+    "controle_federal":   "FEDERAL",
+    "controle_simples":   "SIMPLES NACIONAL",
+    "parcelamentos":      "PARCELAMENTOS",
+    "senhas_acessos":     "SENHAS E ACESSOS",
+    "alteracao_empresa":  "ALTERAÇÃO DE EMPRESA",
+    "obrigacoes_prazos":  "OBRIGAÇÕES E PRAZOS",
+}
 
 # ============================================================================
 # CONFIGURAÇÃO
@@ -360,71 +367,74 @@ def _log_alteracoes_empresa(df_antes, df_depois):
     conn.close()
 
 
-# ── Google Sheets — backup persistente ───────────────────────────────────────
+# ── Google Sheets via Apps Script ────────────────────────────────────────────
 
-def _gc():
-    """Retorna cliente gspread autenticado via st.secrets, ou None se não configurado."""
-    try:
-        scope = ["https://spreadsheets.google.com/feeds",
-                 "https://www.googleapis.com/auth/drive"]
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(
-            dict(st.secrets["gcp_service_account"]), scope
-        )
-        return gspread.authorize(creds)
-    except Exception:
-        return None
+def _script_url():
+    return str(st.secrets.get("SCRIPT_URL", ""))
 
+def _script_token():
+    return str(st.secrets.get("SCRIPT_TOKEN", ""))
 
-def _sheets_salvar(table_name, df_local):
-    """Grava o conteúdo de uma tabela SQLite na aba correspondente do Google Sheets."""
-    gc = _gc()
-    if gc is None:
+def _sheets_salvar(table_name, df):
+    """Envia dados para a aba correspondente via Apps Script."""
+    url = _script_url()
+    if not url:
         return False
+    aba = _ABA.get(table_name, table_name)
+    df_s = df.copy().astype(str)
+    df_s = df_s.replace("nan", "").replace("None", "").replace("NaT", "")
+    dados = [df_s.columns.tolist()] + df_s.values.tolist()
     try:
-        sh = gc.open_by_key(_SPREADSHEET_ID)
-        aba = f"CTRL_{table_name}"
-        try:
-            ws = sh.worksheet(aba)
-        except gspread.WorksheetNotFound:
-            ws = sh.add_worksheet(title=aba, rows=2000, cols=50)
-        ws.clear()
-        df_str = df_local.astype(str).replace("nan", "").replace("None", "")
-        data = [df_str.columns.tolist()] + df_str.values.tolist()
-        ws.update(data)
-        return True
+        r = requests.post(url,
+                          json={"token": _script_token(), "aba": aba, "dados": dados},
+                          allow_redirects=True, timeout=30)
+        return r.json().get("ok", False)
     except Exception:
         return False
+
+
+def _sheets_carregar(table_name):
+    """Carrega dados de uma aba da planilha via Apps Script."""
+    url = _script_url()
+    if not url:
+        return pd.DataFrame()
+    aba = _ABA.get(table_name, table_name)
+    try:
+        r = requests.get(url,
+                         params={"token": _script_token(), "aba": aba},
+                         allow_redirects=True, timeout=30)
+        res = r.json()
+        if res.get("ok") and res.get("dados"):
+            linhas = res["dados"]
+            if len(linhas) > 1:
+                return pd.DataFrame(linhas[1:], columns=[str(c) for c in linhas[0]])
+        return pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
 
 
 def _sheets_restaurar(table_name):
-    """Tenta restaurar dados do Google Sheets para o SQLite local."""
-    gc = _gc()
-    if gc is None:
+    """Restaura dados do Google Sheets para o SQLite local."""
+    df = _sheets_carregar(table_name)
+    if df.empty:
         return False
+    conn = get_conn()
     try:
-        sh = gc.open_by_key(_SPREADSHEET_ID)
-        aba = f"CTRL_{table_name}"
-        ws = sh.worksheet(aba)
-        records = ws.get_all_records()
-        if not records:
-            return False
-        df = pd.DataFrame(records)
-        conn = get_conn()
         df.to_sql(table_name, conn, if_exists="replace", index=False)
         conn.close()
         return True
     except Exception:
+        conn.close()
         return False
 
 
 def _restaurar_se_vazio(table_name):
     """Se a tabela local estiver vazia, tenta restaurar do Google Sheets."""
-    df = _load(table_name)
-    if df.empty:
+    if _load(table_name).empty:
         _sheets_restaurar(table_name)
 
 
-# Restaura empresas na inicialização da página (evita perda entre reinícios)
+# Na inicialização: restaura empresas do backup se necessário
 _restaurar_se_vazio("empresas_controle")
 
 
