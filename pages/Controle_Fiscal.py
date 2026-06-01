@@ -236,6 +236,12 @@ def init_db():
 
 init_db()
 
+# Restaura do Sheets apenas UMA vez por sessão
+if "db_restaurado" not in st.session_state:
+    for _tbl in _ABA.keys():
+        _restaurar_se_vazio(_tbl)
+    st.session_state["db_restaurado"] = True
+
 # ============================================================================
 # AUTENTICAÇÃO
 # ============================================================================
@@ -383,10 +389,6 @@ def _sincronizar_sheets(table_name):
     threading.Thread(target=_enviar, daemon=True).start()
 
 
-# Na inicialização: restaura todas as tabelas do backup se necessário
-for _tbl in _ABA.keys():
-    _restaurar_se_vazio(_tbl)
-
 
 def _normaliza_cnpj(val):
     digits = re.sub(r"\D", "", str(val))
@@ -529,6 +531,10 @@ def _importar_empresas_sheets():
 
 
 def _auto_populate(table, competencia, filtro_fn):
+    cache_key = f"populated_{table}_{competencia}"
+    if cache_key in st.session_state:
+        return  # já populou nessa sessão
+
     conn = get_conn()
     existentes = {
         r[0] for r in conn.execute(
@@ -540,10 +546,12 @@ def _auto_populate(table, competencia, filtro_fn):
     )
     conn.close()
     if df_emp.empty:
+        st.session_state[cache_key] = True
         return
     novas = filtro_fn(df_emp)
     novas = novas[~novas["cod"].isin(existentes)]
     if novas.empty:
+        st.session_state[cache_key] = True
         return
     conn = get_conn()
     c = conn.cursor()
@@ -551,8 +559,9 @@ def _auto_populate(table, competencia, filtro_fn):
         _inserir_controle(c, table, competencia, emp)
     conn.commit()
     conn.close()
-    # Sincroniza após auto-popular
     _sincronizar_sheets(table)
+
+    st.session_state[cache_key] = True
 
 
 def _inserir_controle(c, table, comp, emp):
