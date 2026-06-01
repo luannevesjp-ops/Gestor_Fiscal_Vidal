@@ -873,8 +873,9 @@ def pagina_empresas_ctrl():
             _log_alteracoes_empresa(df_antes, df_rev)
             # Aguarda o banco finalizar e sincroniza alterações
             time.sleep(2)
-            _sincronizar_sheets("alteracao_empresa")
-            st.success("✅ Salvo e sincronizado!")
+            df_alt = _load("alteracao_empresa")
+            ok = _sheets_salvar("alteracao_empresa", df_alt)
+            st.success(f"✅ Salvo! Alterações no Sheets: {ok} | Registros: {len(df_alt)}")
             st.rerun()
 
     with col_d:
