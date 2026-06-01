@@ -423,30 +423,65 @@ _CAMPOS_EMP = {
 def _log_alteracoes_empresa(df_antes, df_depois):
     if df_antes.empty or df_depois.empty:
         return
-    idx = df_antes.set_index("id")
+
     conn = get_conn()
+
+    # Garante que IDs sejam comparáveis
+    df_antes["id"] = df_antes["id"].astype(str)
+    df_depois["id"] = df_depois["id"].astype(str)
+
+    idx_antes = df_antes.set_index("id")
+
     for _, row_n in df_depois.iterrows():
-        try:
-            rid = int(float(str(row_n.get("id", 0))))
-        except Exception:
+
+        rid = str(row_n.get("id", "")).strip()
+
+        if not rid or rid not in idx_antes.index:
             continue
-        if not rid or rid not in idx.index:
-            continue
-        row_a = idx.loc[rid]
-        diffs = []
+
+        row_a = idx_antes.loc[rid]
+
+        alteracoes = []
+
         for campo, nome in _CAMPOS_EMP.items():
-            v_a = str(row_a.get(campo, "") or "").strip()
-            v_n = str(row_n.get(campo, "") or "").strip()
-            if v_a != v_n:
-                diffs.append(f"{nome}: '{v_a}' -> '{v_n}'")
-        if diffs:
-            conn.execute(
-                "INSERT INTO alteracao_empresa (tipo, cod, razao_social, cnpj, usuario, observacao) VALUES (?, ?, ?, ?, ?, ?)",
-                ("ALTERACAO", str(row_a.get("cod", "")), str(row_a.get("razao_social", "")),
-                 str(row_a.get("cnpj", "")), str(_NIVEL), " | ".join(diffs))
-            )
+
+            valor_antigo = str(row_a.get(campo, "") or "").strip()
+            valor_novo   = str(row_n.get(campo, "") or "").strip()
+
+            if valor_antigo != valor_novo:
+
+                alteracoes.append(
+                    f"{nome}: '{valor_antigo}' -> '{valor_novo}'"
+                )
+
+        # Se encontrou alteração, grava log
+        if alteracoes:
+
+            conn.execute("""
+                INSERT INTO alteracao_empresa
+                (
+                    tipo,
+                    cod,
+                    razao_social,
+                    cnpj,
+                    usuario,
+                    observacao
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                "ALTERACAO",
+                str(row_n.get("cod", "")),
+                str(row_n.get("razao_social", "")),
+                str(row_n.get("cnpj", "")),
+                str(_NIVEL),
+                " | ".join(alteracoes)
+            ))
+
     conn.commit()
     conn.close()
+
+    # Sincroniza automaticamente
+    _sincronizar_sheets("alteracao_empresa")
 
 
 def _importar_empresas_sheets():
