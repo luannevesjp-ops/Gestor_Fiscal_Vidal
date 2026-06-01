@@ -480,7 +480,7 @@ def _log_alteracoes_empresa(df_antes, df_depois):
             v_a = str(row_a.get(campo, "") or "").strip()
             v_n = str(row_n.get(campo, "") or "").strip()
             if v_a != v_n:
-                diffs.append(f"{nome}: '{v_a}' → '{v_n}'")
+                diffs.append(f"{nome}: '{v_a}' -> '{v_n}'")
         if diffs:
             conn.execute("""
                 INSERT INTO alteracao_empresa
@@ -1373,6 +1373,8 @@ def pagina_alteracao():
     st.markdown("<p style='color:#666;'>Registro automático de todas as inclusões e exclusões de empresas.</p>",
                 unsafe_allow_html=True)
 
+    # Restaura do Sheets se o SQLite estiver vazio
+    _restaurar_se_vazio("alteracao_empresa")
     df = _load("alteracao_empresa")
     if df.empty:
         st.info("Nenhuma alteração registrada.")
