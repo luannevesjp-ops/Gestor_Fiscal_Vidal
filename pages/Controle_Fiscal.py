@@ -384,16 +384,12 @@ def _restaurar_se_vazio(table_name):
         _sheets_restaurar(table_name)
 
 
-def _sincronizar_sheets(table_name, sync=False):
-    """Sincroniza com Google Sheets.
-    sync=True  → síncrono (aguarda resposta) — use ao salvar dados importantes
-    sync=False → apenas tenta, sem bloquear
-    """
-    try:
-        df_full = _load(table_name)
-        _sheets_salvar(table_name, df_full)
-    except Exception:
-        pass
+def _sincronizar_sheets(table_name):
+    """Sincroniza tabela com Google Sheets."""
+    df_full = _load(table_name)
+    if df_full.empty and table_name != "alteracao_empresa":
+        return
+    _sheets_salvar(table_name, df_full)
 
 
 # Restaura do Sheets apenas UMA vez por sessão
@@ -476,8 +472,6 @@ def _log_alteracoes_empresa(df_antes, df_depois):
                   " | ".join(diffs)))
     conn.commit()
     conn.close()
-    # Sincroniza log de alterações automaticamente
-    _sincronizar_sheets("alteracao_empresa")
 
 
 def _importar_empresas_sheets():
