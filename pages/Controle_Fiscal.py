@@ -274,6 +274,22 @@ check_auth()
 _NIVEL = st.session_state.get("nivel_acesso", "FISCAL")
 _GESTOR = _NIVEL == "GESTOR"
 
+# ── TESTE TEMPORÁRIO (remova depois) ─────────────────────────────────────────
+if st.sidebar.button("🔧 Testar Sheets", key="teste_sheets"):
+    url = _script_url() if '_script_url' in dir() else str(st.secrets.get("SCRIPT_URL", ""))
+    token = str(st.secrets.get("SCRIPT_TOKEN", ""))
+    st.sidebar.write(f"URL: `{url[:60]}...`" if url else "❌ URL vazia!")
+    st.sidebar.write(f"Token: `{token}`" if token else "❌ Token vazio!")
+    if url:
+        try:
+            r = requests.post(url,
+                json={"token": token, "aba": "TESTE", "dados": [["col1","col2"],["ok","123"]]},
+                allow_redirects=True, timeout=15)
+            st.sidebar.write(f"Status HTTP: {r.status_code}")
+            st.sidebar.write(f"Resposta: {r.text[:200]}")
+        except Exception as ex:
+            st.sidebar.error(f"Erro: {ex}")
+
 # ============================================================================
 # HELPERS
 # ============================================================================
@@ -299,72 +315,6 @@ def _load(table, where="", params=()):
     df = pd.read_sql_query(sql, conn, params=list(params))
     conn.close()
     return df
-
-
-def _save_grid(df, table):
-    """Salva alterações no SQLite. Usa cod+competencia como chave alternativa se id não disponível."""
-    conn = get_conn()
-    c = conn.cursor()
-    for _, row in df.iterrows():
-        d = {k: ("" if (v is None or (isinstance(v, float) and pd.isna(v))) else str(v))
-             for k, v in row.to_dict().items()}
-        row_id = d.pop("id", None)
-        # id pode vir como float ("1.0") — converte para int
-        if row_id is not None:
-            try:
-                row_id = int(float(row_id))
-            except (ValueError, TypeError):
-                row_id = None
-        if not row_id:
-            continue
-        d.pop("competencia", None)
-        sets = ", ".join([f'"{k}"=?' for k in d])
-        vals = list(d.values()) + [row_id]
-        c.execute(f'UPDATE {table} SET {sets} WHERE id=?', vals)
-    conn.commit()
-    conn.close()
-
-
-_CAMPOS_EMP = {
-    "cod": "Código", "razao_social": "Razão Social", "cnpj": "CNPJ",
-    "regime": "Regime", "matriz_filial": "Matriz/Filial",
-    "ie": "Insc. Estadual", "im": "Insc. Municipal", "uf": "UF",
-    "municipio": "Município", "grupo": "Grupo",
-    "responsavel_fiscal": "Responsável Fiscal", "observacoes": "Observações",
-}
-
-def _log_alteracoes_empresa(df_antes, df_depois):
-    """Compara linha a linha e registra no log o que mudou, campo por campo."""
-    if df_antes.empty or df_depois.empty:
-        return
-    idx = df_antes.set_index("id")
-    conn = get_conn()
-    for _, row_n in df_depois.iterrows():
-        try:
-            rid = int(float(str(row_n.get("id", 0))))
-        except Exception:
-            continue
-        if not rid or rid not in idx.index:
-            continue
-        row_a = idx.loc[rid]
-        diffs = []
-        for campo, nome in _CAMPOS_EMP.items():
-            v_a = str(row_a.get(campo, "") or "").strip()
-            v_n = str(row_n.get(campo, "") or "").strip()
-            if v_a != v_n:
-                diffs.append(f"{nome}: '{v_a}' → '{v_n}'")
-        if diffs:
-            conn.execute("""
-                INSERT INTO alteracao_empresa
-                    (tipo, cod, razao_social, cnpj, usuario, observacao)
-                VALUES ('ALTERAÇÃO', ?, ?, ?, ?, ?)
-            """, (str(row_a.get("cod", "")),
-                  str(row_a.get("razao_social", "")),
-                  str(row_a.get("cnpj", "")),
-                  _NIVEL,
-                  " | ".join(diffs)))
-    conn.commit()
-    conn.close()
 
 
 # ── Google Sheets via Apps Script ────────────────────────────────────────────
@@ -434,8 +384,18 @@ def _restaurar_se_vazio(table_name):
         _sheets_restaurar(table_name)
 
 
-# Na inicialização: restaura empresas do backup se necessário
-_restaurar_se_vazio("empresas_controle")
+def _sincronizar_sheets(table_name):
+    """Sincroniza tabela completa com Google Sheets em background (não bloqueia)."""
+    try:
+        df_full = _load(table_name)
+        _sheets_salvar(table_name, df_full)
+    except Exception:
+        pass  # Nunca bloqueia o fluxo principal
+
+
+# Na inicialização: restaura todas as tabelas do backup se necessário
+for _tbl in _ABA.keys():
+    _restaurar_se_vazio(_tbl)
 
 
 def _normaliza_cnpj(val):
@@ -443,6 +403,76 @@ def _normaliza_cnpj(val):
     if len(digits) == 15:
         digits = digits[:14]
     return digits.zfill(14)
+
+
+def _save_grid(df, table):
+    """Salva alterações no SQLite e sincroniza automaticamente com Google Sheets."""
+    conn = get_conn()
+    c = conn.cursor()
+    for _, row in df.iterrows():
+        d = {k: ("" if (v is None or (isinstance(v, float) and pd.isna(v))) else str(v))
+             for k, v in row.to_dict().items()}
+        row_id = d.pop("id", None)
+        if row_id is not None:
+            try:
+                row_id = int(float(row_id))
+            except (ValueError, TypeError):
+                row_id = None
+        if not row_id:
+            continue
+        d.pop("competencia", None)
+        sets = ", ".join([f'"{k}"=?' for k in d])
+        vals = list(d.values()) + [row_id]
+        c.execute(f'UPDATE {table} SET {sets} WHERE id=?', vals)
+    conn.commit()
+    conn.close()
+
+    # ── Sincroniza automaticamente com Google Sheets ──────────────────────────
+    _sincronizar_sheets(table)
+
+
+_CAMPOS_EMP = {
+    "cod": "Código", "razao_social": "Razão Social", "cnpj": "CNPJ",
+    "regime": "Regime", "matriz_filial": "Matriz/Filial",
+    "ie": "Insc. Estadual", "im": "Insc. Municipal", "uf": "UF",
+    "municipio": "Município", "grupo": "Grupo",
+    "responsavel_fiscal": "Responsável Fiscal", "observacoes": "Observações",
+}
+
+def _log_alteracoes_empresa(df_antes, df_depois):
+    """Compara linha a linha e registra no log o que mudou, campo por campo."""
+    if df_antes.empty or df_depois.empty:
+        return
+    idx = df_antes.set_index("id")
+    conn = get_conn()
+    for _, row_n in df_depois.iterrows():
+        try:
+            rid = int(float(str(row_n.get("id", 0))))
+        except Exception:
+            continue
+        if not rid or rid not in idx.index:
+            continue
+        row_a = idx.loc[rid]
+        diffs = []
+        for campo, nome in _CAMPOS_EMP.items():
+            v_a = str(row_a.get(campo, "") or "").strip()
+            v_n = str(row_n.get(campo, "") or "").strip()
+            if v_a != v_n:
+                diffs.append(f"{nome}: '{v_a}' → '{v_n}'")
+        if diffs:
+            conn.execute("""
+                INSERT INTO alteracao_empresa
+                    (tipo, cod, razao_social, cnpj, usuario, observacao)
+                VALUES ('ALTERAÇÃO', ?, ?, ?, ?, ?)
+            """, (str(row_a.get("cod", "")),
+                  str(row_a.get("razao_social", "")),
+                  str(row_a.get("cnpj", "")),
+                  _NIVEL,
+                  " | ".join(diffs)))
+    conn.commit()
+    conn.close()
+    # Sincroniza log de alterações automaticamente
+    _sincronizar_sheets("alteracao_empresa")
 
 
 def _importar_empresas_sheets():
@@ -500,6 +530,11 @@ def _importar_empresas_sheets():
         conn.close()
         return 0, f"Erro ao salvar: {ex}"
     conn.close()
+
+    # Sincroniza empresas e log após importação
+    _sincronizar_sheets("empresas_controle")
+    _sincronizar_sheets("alteracao_empresa")
+
     return inseridos, f"{inseridos} importada(s). {ignorados} já existia(m) e foram ignorada(s)."
 
 
@@ -526,6 +561,8 @@ def _auto_populate(table, competencia, filtro_fn):
         _inserir_controle(c, table, competencia, emp)
     conn.commit()
     conn.close()
+    # Sincroniza após auto-popular
+    _sincronizar_sheets(table)
 
 
 def _inserir_controle(c, table, comp, emp):
@@ -588,7 +625,6 @@ def _build_grid(df, edit_cols=None, height=450, key="grid", selection=False):
         enableCellTextSelection=True, suppressMenuHide=True,
         localeText={"filterOoo": "Filtrar...", "noRowsToShow": "Nenhum registro"},
     )
-    # Combina VALUE_CHANGED + SELECTION_CHANGED quando seleção está ativa
     if selection:
         mode = GridUpdateMode.VALUE_CHANGED | GridUpdateMode.SELECTION_CHANGED
     else:
@@ -630,14 +666,11 @@ def _download_btn(df, nome, key):
 def _menu_controle(titulo, table, filtro_fn, colunas, edit_gestor, edit_fiscal, key):
     st.markdown(f"<h2 style='color:#1d3f77;'>{titulo}</h2>", unsafe_allow_html=True)
 
-    # Filtros
     df_vazio = pd.DataFrame(columns=["responsavel"])
     comp, resp = _filtros_comp_resp(df_vazio, key)
 
-    # Auto-popula
     _auto_populate(table, comp, filtro_fn)
 
-    # Carrega
     df = _load(table, "competencia=?", (comp,))
     if df.empty:
         st.info("Nenhuma empresa nesta competência. Verifique se há empresas cadastradas no menu **EMPRESAS** e selecione a competência correta.")
@@ -645,12 +678,10 @@ def _menu_controle(titulo, table, filtro_fn, colunas, edit_gestor, edit_fiscal, 
     if resp != "Todos" and "responsavel" in df.columns:
         df = df[df["responsavel"].astype(str) == resp]
 
-    # Colunas para exibição (inclui id oculto)
     cols_exib = ["id"] + [c for c in colunas if c in df.columns]
     df_exib = df[cols_exib].copy()
     df_exib = df_exib.fillna("")
 
-    # Edição conforme nível
     edit_cols = edit_gestor if _GESTOR else edit_fiscal
 
     st.markdown(
@@ -667,11 +698,7 @@ def _menu_controle(titulo, table, filtro_fn, colunas, edit_gestor, edit_fiscal, 
             df_new = pd.DataFrame(resp_grid["data"])
             if not df_new.empty:
                 _save_grid(df_new, table)
-                # Sincroniza com Google Sheets
-                df_full = _load(table, "competencia=?", (comp,))
-                ok = _sheets_salvar(table, df_full)
-                msg = "✅ Salvo e sincronizado!" if ok else "✅ Salvo localmente."
-                st.success(msg)
+                st.success("✅ Salvo e sincronizado!")
                 st.rerun()
     with col_d:
         _download_btn(df_exib.drop(columns=["id"], errors="ignore"),
@@ -724,7 +751,6 @@ if st.sidebar.button("Sair", use_container_width=True):
 def pagina_empresas_ctrl():
     st.markdown("<h2 style='color:#1d3f77;'>EMPRESAS</h2>", unsafe_allow_html=True)
 
-    # --- Importar do Google Sheets (GESTOR) ---
     if _GESTOR:
         col_imp, _ = st.columns([2, 3])
         with col_imp:
@@ -739,7 +765,6 @@ def pagina_empresas_ctrl():
                     st.error(msg)
         st.divider()
 
-    # --- Adicionar empresa (só GESTOR) ---
     if _GESTOR:
         with st.expander("➕ Nova Empresa", expanded=False):
             c1, c2, c3 = st.columns(3)
@@ -785,8 +810,10 @@ def pagina_empresas_ctrl():
                         st.error(f"Erro: {ex}")
                     finally:
                         conn.close()
+                    # Sincroniza após adicionar empresa
+                    _sincronizar_sheets("empresas_controle")
+                    _sincronizar_sheets("alteracao_empresa")
 
-    # --- Listagem ---
     df = _load("empresas_controle", "ativo=1")
     if df.empty:
         if _GESTOR:
@@ -795,7 +822,6 @@ def pagina_empresas_ctrl():
             st.info("Nenhuma empresa cadastrada.")
         return
 
-    # --- Totalizador ---
     total   = len(df)
     simples = (df["regime"].astype(str).str.upper().str.contains("SIMPLES", na=False)).sum()
     matrizes = (df["matriz_filial"].astype(str).str.upper() == "MATRIZ").sum()
@@ -839,26 +865,15 @@ def pagina_empresas_ctrl():
         if _GESTOR and st.button("💾 Salvar Alterações", type="primary", key="save_emp"):
             df_edited = pd.DataFrame(resp_grid["data"])
             df_rev = df_edited.rename(columns={v: k for k, v in RENAME.items()})
-            # Carrega estado ANTES para comparar mudanças
             df_antes = _load("empresas_controle", "ativo=1")
-            # Salva no SQLite
             _save_grid(df_rev, "empresas_controle")
-            # Registra no log o que exatamente mudou
             _log_alteracoes_empresa(df_antes, df_rev)
-            # Sincroniza com Google Sheets
-            df_atual = _load("empresas_controle", "ativo=1")
-            ok = _sheets_salvar("empresas_controle", df_atual)
-            if ok:
-                st.success("✅ Salvo e sincronizado com a planilha Google!")
-            else:
-                st.success("✅ Salvo localmente.")
-                st.error("❌ Google Sheets não está configurado. Os dados serão perdidos ao reiniciar o servidor. Configure as credenciais conforme instruções abaixo.")
+            st.success("✅ Salvo e sincronizado!")
             st.rerun()
 
     with col_d:
         _download_btn(df_show.drop(columns=["id"], errors="ignore"), "empresas_controle", "emp")
 
-    # --- Excluir empresa (selectbox — sempre funciona) ---
     if _GESTOR:
         st.divider()
         st.markdown("#### 🗑️ Excluir Empresa")
@@ -877,7 +892,8 @@ def pagina_empresas_ctrl():
                     VALUES('EXCLUSÃO',?,?,?,?)""", (r["cod"], r["razao_social"], r["cnpj"], _NIVEL))
                 conn.commit()
                 conn.close()
-                _sheets_salvar("empresas_controle", _load("empresas_controle", "ativo=1"))
+                _sincronizar_sheets("empresas_controle")
+                _sincronizar_sheets("alteracao_empresa")
                 st.success(f"Empresa '{r['razao_social']}' excluída com sucesso.")
                 st.rerun()
 
@@ -1041,6 +1057,7 @@ def pagina_parcelamentos():
                           p_sta, str(p_data), p_obs, p_email, p_obs2))
                     conn.commit()
                     conn.close()
+                    _sincronizar_sheets("parcelamentos")
                     st.success("Parcelamento adicionado!")
                     st.rerun()
 
@@ -1067,7 +1084,7 @@ def pagina_parcelamentos():
             df_ed = pd.DataFrame(resp["data"])
             df_ed = df_ed.rename(columns={v: k for k, v in RENAME.items()})
             _save_grid(df_ed, "parcelamentos")
-            st.success("Salvo!")
+            st.success("✅ Salvo e sincronizado!")
             st.rerun()
     with col_d:
         _download_btn(df_show.drop(columns=["id"], errors="ignore"), "parcelamentos", "parc")
@@ -1108,6 +1125,7 @@ def pagina_senhas():
                       s_cod_ac, s_mun, s_login, s_senha, s_obs))
                 conn.commit()
                 conn.close()
+                _sincronizar_sheets("senhas_acessos")
                 st.success("Registro adicionado!")
                 st.rerun()
 
@@ -1130,7 +1148,7 @@ def pagina_senhas():
             df_ed = pd.DataFrame(resp["data"])
             df_ed = df_ed.rename(columns={v: k for k, v in RENAME.items()})
             _save_grid(df_ed, "senhas_acessos")
-            st.success("Salvo!")
+            st.success("✅ Salvo e sincronizado!")
             st.rerun()
     with col_d:
         _download_btn(df_show.drop(columns=["id"], errors="ignore"), "senhas_acessos", "sen")
@@ -1205,7 +1223,7 @@ def pagina_obrigacoes():
             if st.button("💾 Salvar", key=f"save_obr_sn_{uf}", type="primary"):
                 df_ed = pd.DataFrame(resp["data"]).rename(columns={v:k for k,v in RENAME_O.items()})
                 _save_grid(df_ed, "obrigacoes_prazos")
-                st.success("Salvo!")
+                st.success("✅ Salvo e sincronizado!")
                 st.rerun()
 
     with tab_pr:
@@ -1225,7 +1243,7 @@ def pagina_obrigacoes():
             if st.button("💾 Salvar", key=f"save_obr_pr_{uf}", type="primary"):
                 df_ed = pd.DataFrame(resp["data"]).rename(columns={v:k for k,v in RENAME_O.items()})
                 _save_grid(df_ed, "obrigacoes_prazos")
-                st.success("Salvo!")
+                st.success("✅ Salvo e sincronizado!")
                 st.rerun()
 
 # ============================================================================
@@ -1278,7 +1296,6 @@ def pagina_painel():
 
     st.divider()
 
-    # Gráfico geral
     df_resumo = pd.DataFrame(dados)
     fig = go.Figure()
     fig.add_trace(go.Bar(name="Concluído", x=df_resumo["Menu"],
@@ -1298,7 +1315,6 @@ def pagina_painel():
 
     st.divider()
 
-    # Lista de pendentes
     st.markdown("### Pendências Detalhadas")
     pendentes = []
     for nome, tbl in tabelas:
@@ -1372,28 +1388,28 @@ elif pagina == "CALENDÁRIO":
 elif pagina == "MUNICIPAL":
     _menu_controle(
         "MUNICIPAL", "controle_municipal",
-        lambda df: df,  # todas as empresas ativas
+        lambda df: df,
         _COLS_MUNI, _EDIT_GESTOR_MUNI, _EDIT_FISCAL_MUNI, "municipal",
     )
 
 elif pagina == "ESTADUAL":
     _menu_controle(
         "ESTADUAL", "controle_estadual",
-        _filtro_est,  # com IE, não Simples
+        _filtro_est,
         _COLS_EST, _EDIT_GESTOR_EST, _EDIT_FISCAL_EST, "estadual",
     )
 
 elif pagina == "FEDERAL":
     _menu_controle(
         "FEDERAL", "controle_federal",
-        _filtro_fed,  # não filial, não Simples
+        _filtro_fed,
         _COLS_FED, _EDIT_GESTOR_FED, _EDIT_FISCAL_FED, "federal",
     )
 
 elif pagina == "SIMPLES NACIONAL":
     _menu_controle(
         "SIMPLES NACIONAL", "controle_simples",
-        _filtro_sn,  # só Simples Nacional
+        _filtro_sn,
         _COLS_SN, _EDIT_GESTOR_SN, _EDIT_FISCAL_SN, "simples",
     )
 
