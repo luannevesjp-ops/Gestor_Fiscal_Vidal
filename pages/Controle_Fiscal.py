@@ -8,7 +8,8 @@ import sqlite3
 import os
 import re
 import requests
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
 from io import BytesIO
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
 from st_aggrid.shared import JsCode
@@ -26,8 +27,8 @@ _ABA = {
     "controle_simples":   "SIMPLES NACIONAL",
     "parcelamentos":      "PARCELAMENTOS",
     "senhas_acessos":     "SENHAS E ACESSOS",
-    "alteracao_empresa":  "BACKUP",
-    "obrigacoes_prazos":  "OBRIGAÇÕES E PRAZOS",
+    "alteracao_empresa":  "ALTERACAO DE EMPRESA",
+    "obrigacoes_prazos":  "OBRIGACOES E PRAZOS",
 }
 
 # ============================================================================
@@ -36,26 +37,13 @@ _ABA = {
 
 st.set_page_config(page_title="LUATECH - CONTROLE FISCAL", layout="wide")
 
-# Oculta a navegação automática de páginas do Streamlit
 st.markdown("""
 <style>
 [data-testid="stSidebarNav"] { display: none !important; }
-
-/* Cabeçalho do AgGrid — fundo azul escuro, letra branca e negrito */
-.ag-header-cell-text {
-    color: white !important;
-    font-weight: bold !important;
-    font-size: 12px !important;
-}
-.ag-header-cell {
-    background-color: #1d3f77 !important;
-}
-.ag-header-group-cell {
-    background-color: #1d3f77 !important;
-}
-.ag-floating-filter {
-    background-color: #e8eef7 !important;
-}
+.ag-header-cell-text { color: white !important; font-weight: bold !important; font-size: 12px !important; }
+.ag-header-cell { background-color: #1d3f77 !important; }
+.ag-header-group-cell { background-color: #1d3f77 !important; }
+.ag-floating-filter { background-color: #e8eef7 !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -64,7 +52,6 @@ import tempfile
 _PROJ_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _DB_LOCAL = os.path.join(_PROJ_DIR, "controle_fiscal.db")
 
-# No Streamlit Cloud a pasta do projeto é somente leitura — usa /tmp como fallback
 try:
     _teste = os.path.join(_PROJ_DIR, ".write_test")
     open(_teste, "w").close()
@@ -326,30 +313,23 @@ def _script_token():
     return str(st.secrets.get("SCRIPT_TOKEN", ""))
 
 def _sheets_salvar(table_name, df):
-    """Envia dados para a aba correspondente via Apps Script."""
     url = _script_url()
     if not url:
-        print(f"[SHEETS] URL vazia para {table_name}")
         return False
     aba = _ABA.get(table_name, table_name)
     df_s = df.copy().astype(str)
     df_s = df_s.replace("nan", "").replace("None", "").replace("NaT", "")
     dados = [df_s.columns.tolist()] + df_s.values.tolist()
     try:
-        print(f"[SHEETS] Enviando {table_name} → aba '{aba}' | {len(dados)-1} linhas")
         r = requests.post(url,
                           json={"token": _script_token(), "aba": aba, "dados": dados},
                           allow_redirects=True, timeout=30)
-        resultado = r.json()
-        print(f"[SHEETS] Resposta {table_name}: {resultado}")
-        return resultado.get("ok", False)
-    except Exception as ex:
-        print(f"[SHEETS] ERRO {table_name}: {ex}")
+        return r.json().get("ok", False)
+    except Exception:
         return False
 
 
 def _sheets_carregar(table_name):
-    """Carrega dados de uma aba da planilha via Apps Script."""
     url = _script_url()
     if not url:
         return pd.DataFrame()
@@ -369,7 +349,6 @@ def _sheets_carregar(table_name):
 
 
 def _sheets_restaurar(table_name):
-    """Restaura dados do Google Sheets para o SQLite local."""
     df = _sheets_carregar(table_name)
     if df.empty:
         return False
@@ -384,17 +363,16 @@ def _sheets_restaurar(table_name):
 
 
 def _restaurar_se_vazio(table_name):
-    """Se a tabela local estiver vazia, tenta restaurar do Google Sheets."""
     if _load(table_name).empty:
         _sheets_restaurar(table_name)
 
 
 def _sincronizar_sheets(table_name):
-    """Sincroniza tabela com Google Sheets."""
-    df_full = _load(table_name)
-    if df_full.empty and table_name != "alteracao_empresa":
-        return
-    _sheets_salvar(table_name, df_full)
+    try:
+        df_full = _load(table_name)
+        _sheets_salvar(table_name, df_full)
+    except Exception:
+        pass
 
 
 # Restaura do Sheets apenas UMA vez por sessão
@@ -412,7 +390,6 @@ def _normaliza_cnpj(val):
 
 
 def _save_grid(df, table):
-    """Salva alterações no SQLite e sincroniza automaticamente com Google Sheets."""
     conn = get_conn()
     c = conn.cursor()
     for _, row in df.iterrows():
@@ -432,8 +409,6 @@ def _save_grid(df, table):
         c.execute(f'UPDATE {table} SET {sets} WHERE id=?', vals)
     conn.commit()
     conn.close()
-
-    # ── Sincroniza automaticamente com Google Sheets ──────────────────────────
     _sincronizar_sheets(table)
 
 
@@ -446,7 +421,6 @@ _CAMPOS_EMP = {
 }
 
 def _log_alteracoes_empresa(df_antes, df_depois):
-    """Compara linha a linha e registra no log o que mudou, campo por campo."""
     if df_antes.empty or df_depois.empty:
         return
     idx = df_antes.set_index("id")
@@ -466,22 +440,16 @@ def _log_alteracoes_empresa(df_antes, df_depois):
             if v_a != v_n:
                 diffs.append(f"{nome}: '{v_a}' -> '{v_n}'")
         if diffs:
-            conn.execute("""
-                INSERT INTO alteracao_empresa
-                    (tipo, cod, razao_social, cnpj, usuario, observacao)
-                VALUES ('ALTERACAO', ?, ?, ?, ?, ?)
-            """, (str(row_a.get("cod", "")),
-                  str(row_a.get("razao_social", "")),
-                  str(row_a.get("cnpj", "")),
-                  str(_NIVEL),
-                  " | ".join(diffs)))
+            conn.execute(
+                "INSERT INTO alteracao_empresa (tipo, cod, razao_social, cnpj, usuario, observacao) VALUES (?, ?, ?, ?, ?, ?)",
+                ("ALTERACAO", str(row_a.get("cod", "")), str(row_a.get("razao_social", "")),
+                 str(row_a.get("cnpj", "")), str(_NIVEL), " | ".join(diffs))
+            )
     conn.commit()
     conn.close()
-    _sincronizar_sheets("alteracao_empresa")
 
 
 def _importar_empresas_sheets():
-    """Lê GERAL do Google Sheets e importa empresas ATIVAS para o SQLite."""
     try:
         resp = requests.get(_SHEET_URL, timeout=30)
         resp.raise_for_status()
@@ -523,10 +491,10 @@ def _importar_empresas_sheets():
                       _v("Regime"), _v("Matriz / Filial"), _v("Insc. Estadual"),
                       _v("Insc. Municipal"), _v("Estado"), _v("Município"),
                       _v("Grupo"), "IMPORTAÇÃO"))
-                conn.execute("""
-                INSERT INTO alteracao_empresa(tipo,cod,razao_social,cnpj,usuario)
-                VALUES('INCLUSÃO',?,?,?,?)
-                """, (cod, _v("Razão Social"), _normaliza_cnpj(_v("CNPJ")), "IMPORTAÇÃO"))
+                conn.execute(
+                    "INSERT INTO alteracao_empresa(tipo,cod,razao_social,cnpj,usuario) VALUES(?,?,?,?,?)",
+                    ("INCLUSAO", cod, _v("Razão Social"), _normaliza_cnpj(_v("CNPJ")), "IMPORTAÇÃO")
+                )
                 inseridos += 1
             else:
                 ignorados += 1
@@ -535,16 +503,12 @@ def _importar_empresas_sheets():
         conn.close()
         return 0, f"Erro ao salvar: {ex}"
     conn.close()
-
-    # Sincroniza empresas e log após importação
     _sincronizar_sheets("empresas_controle")
     _sincronizar_sheets("alteracao_empresa")
-
     return inseridos, f"{inseridos} importada(s). {ignorados} já existia(m) e foram ignorada(s)."
 
 
 def _auto_populate(table, competencia, filtro_fn):
-    # Roda apenas uma vez por tabela/competência por sessão
     cache_key = f"populated_{table}_{competencia}"
     if cache_key in st.session_state:
         return
@@ -555,9 +519,7 @@ def _auto_populate(table, competencia, filtro_fn):
             f"SELECT cod FROM {table} WHERE competencia=?", (competencia,)
         ).fetchall()
     }
-    df_emp = pd.read_sql_query(
-        "SELECT * FROM empresas_controle WHERE ativo=1", conn
-    )
+    df_emp = pd.read_sql_query("SELECT * FROM empresas_controle WHERE ativo=1", conn)
     conn.close()
     if df_emp.empty:
         return
@@ -581,21 +543,18 @@ def _inserir_controle(c, table, comp, emp):
         VALUES(?,?,?,?,?,?,?,?,?)""",
         (comp, e("cod"), e("razao_social"), e("cnpj"), e("regime"),
          e("im"), e("uf"), e("municipio"), e("responsavel_fiscal")))
-
     elif table == "controle_estadual":
         c.execute("""INSERT OR IGNORE INTO controle_estadual
         (competencia,cod,razao_social,cnpj,regime,ie,uf,municipio,responsavel)
         VALUES(?,?,?,?,?,?,?,?,?)""",
         (comp, e("cod"), e("razao_social"), e("cnpj"), e("regime"),
          e("ie"), e("uf"), e("municipio"), e("responsavel_fiscal")))
-
     elif table == "controle_federal":
         c.execute("""INSERT OR IGNORE INTO controle_federal
         (competencia,cod,razao_social,cnpj,regime,uf,municipio,responsavel)
         VALUES(?,?,?,?,?,?,?,?)""",
         (comp, e("cod"), e("razao_social"), e("cnpj"), e("regime"),
          e("uf"), e("municipio"), e("responsavel_fiscal")))
-
     elif table == "controle_simples":
         c.execute("""INSERT OR IGNORE INTO controle_simples
         (competencia,cod,razao_social,cnpj,ie,im,uf,municipio,responsavel)
@@ -640,20 +599,21 @@ def _build_grid(df, edit_cols=None, height=450, key="grid", selection=False):
     return AgGrid(
         df, gridOptions=gb.build(), height=height, key=key,
         fit_columns_on_grid_load=False, enable_enterprise_modules=False,
-        update_mode=mode,
-        allow_unsafe_jscode=True, reload_data=False,
+        update_mode=mode, allow_unsafe_jscode=True, reload_data=False,
     )
 
 
-def _filtros_comp_resp(df, key):
+def _comp_anterior():
     hoje = datetime.now()
+    primeiro_dia = hoje.replace(day=1)
+    mes_ant = primeiro_dia - timedelta(days=1)
+    return f"{mes_ant.month:02d}/{mes_ant.year}"
+
+
+def _filtros_comp_resp(df, key):
     c1, c2 = st.columns(2)
     with c1:
-        comp = st.text_input(
-            "Competência (MM/AAAA)",
-            value=f"{(hoje.replace(day=1) - __import__("datetime").timedelta(days=1)).month:02d}/{(hoje.replace(day=1) - __import__("datetime").timedelta(days=1)).year}",
-            key=f"{key}_comp",
-        )
+        comp = st.text_input("Competência (MM/AAAA)", value=_comp_anterior(), key=f"{key}_comp")
     with c2:
         resps = ["Todos"] + sorted(
             df["responsavel"].dropna().astype(str).unique().tolist()
@@ -681,14 +641,13 @@ def _menu_controle(titulo, table, filtro_fn, colunas, edit_gestor, edit_fiscal, 
 
     df = _load(table, "competencia=?", (comp,))
     if df.empty:
-        st.info("Nenhuma empresa nesta competência. Verifique se há empresas cadastradas no menu **EMPRESAS** e selecione a competência correta.")
+        st.info("Nenhuma empresa nesta competência.")
         return
     if resp != "Todos" and "responsavel" in df.columns:
         df = df[df["responsavel"].astype(str) == resp]
 
     cols_exib = ["id"] + [c for c in colunas if c in df.columns]
-    df_exib = df[cols_exib].copy()
-    df_exib = df_exib.fillna("")
+    df_exib = df[cols_exib].copy().fillna("")
 
     edit_cols = edit_gestor if _GESTOR else edit_fiscal
 
@@ -727,21 +686,12 @@ st.sidebar.markdown(f"""
 st.sidebar.markdown("<br>", unsafe_allow_html=True)
 
 _MENUS = [
-    "EMPRESAS",
-    "CALENDÁRIO",
-    "MUNICIPAL",
-    "ESTADUAL",
-    "FEDERAL",
-    "SIMPLES NACIONAL",
-    "PARCELAMENTOS",
-    "SENHAS E ACESSOS",
-    "OBRIGAÇÕES E PRAZOS",
-    "PAINEL DE CONTROLE",
-    "ALTERAÇÃO DE EMPRESA",
+    "EMPRESAS", "CALENDÁRIO", "MUNICIPAL", "ESTADUAL", "FEDERAL",
+    "SIMPLES NACIONAL", "PARCELAMENTOS", "SENHAS E ACESSOS",
+    "OBRIGAÇÕES E PRAZOS", "PAINEL DE CONTROLE", "ALTERAÇÃO DE EMPRESA",
 ]
 
 pagina = st.sidebar.radio("Menu", _MENUS, label_visibility="collapsed")
-
 st.sidebar.markdown("<hr style='margin:8px 0;'>", unsafe_allow_html=True)
 
 if st.sidebar.button("← Voltar ao Sistema", use_container_width=True):
@@ -807,10 +757,10 @@ def pagina_empresas_ctrl():
                         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
                         """, (n_cod.strip(), n_razao.strip(), n_cnpj, n_regime, n_mf,
                               n_ie, n_im, n_uf, n_mun, n_grupo, n_resp, n_obs, _NIVEL))
-                        conn.execute("""
-                        INSERT INTO alteracao_empresa(tipo,cod,razao_social,cnpj,usuario)
-                        VALUES('INCLUSÃO',?,?,?,?)
-                        """, (n_cod.strip(), n_razao.strip(), n_cnpj, _NIVEL))
+                        conn.execute(
+                            "INSERT INTO alteracao_empresa(tipo,cod,razao_social,cnpj,usuario) VALUES(?,?,?,?,?)",
+                            ("INCLUSAO", n_cod.strip(), n_razao.strip(), n_cnpj, _NIVEL)
+                        )
                         conn.commit()
                         st.success(f"Empresa '{n_razao}' adicionada!")
                         st.rerun()
@@ -818,29 +768,25 @@ def pagina_empresas_ctrl():
                         st.error(f"Erro: {ex}")
                     finally:
                         conn.close()
-                    # Sincroniza após adicionar empresa
                     _sincronizar_sheets("empresas_controle")
                     _sincronizar_sheets("alteracao_empresa")
 
     df = _load("empresas_controle", "ativo=1")
     if df.empty:
-        if _GESTOR:
-            st.info("Nenhuma empresa cadastrada. Use o formulário acima para adicionar.")
-        else:
-            st.info("Nenhuma empresa cadastrada.")
+        st.info("Nenhuma empresa cadastrada.")
         return
 
-    total   = len(df)
-    simples = (df["regime"].astype(str).str.upper().str.contains("SIMPLES", na=False)).sum()
+    total    = len(df)
+    simples  = (df["regime"].astype(str).str.upper().str.contains("SIMPLES", na=False)).sum()
     matrizes = (df["matriz_filial"].astype(str).str.upper() == "MATRIZ").sum()
     filiais  = (df["matriz_filial"].astype(str).str.upper() == "FILIAL").sum()
 
     c1, c2, c3, c4 = st.columns(4)
     for col, label, valor, cor in [
-        (c1, "Total de Empresas", total,   "#1d3f77"),
-        (c2, "Simples Nacional",  simples, "#27ae60"),
-        (c3, "Matrizes",          matrizes,"#2980b9"),
-        (c4, "Filiais",           filiais, "#8e44ad"),
+        (c1, "Total de Empresas", total,    "#1d3f77"),
+        (c2, "Simples Nacional",  simples,  "#27ae60"),
+        (c3, "Matrizes",          matrizes, "#2980b9"),
+        (c4, "Filiais",           filiais,  "#8e44ad"),
     ]:
         with col:
             st.markdown(
@@ -848,9 +794,7 @@ def pagina_empresas_ctrl():
                 f"text-align:center; border-top:3px solid {cor};'>"
                 f"<span style='font-size:11px; color:#777;'>{label}</span><br>"
                 f"<span style='font-size:26px; font-weight:700; color:{cor};'>{valor}</span>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
+                f"</div>", unsafe_allow_html=True)
     st.markdown("<br>", unsafe_allow_html=True)
 
     COLS = ["id","cod","razao_social","cnpj","regime","matriz_filial",
@@ -864,50 +808,45 @@ def pagina_empresas_ctrl():
         "responsavel_fiscal":"RESPONSÁVEL FISCAL","observacoes":"OBSERVAÇÕES",
     }
     df_show = df_show.rename(columns=RENAME)
-
     edit_emp = list(RENAME.values()) if _GESTOR else []
     resp_grid = _build_grid(df_show, edit_cols=edit_emp, key="grid_emp_ctrl")
 
     col_s, col_d = st.columns([1, 3])
     with col_s:
         if _GESTOR and st.button("💾 Salvar Alterações", type="primary", key="save_emp"):
-            import time
             df_edited = pd.DataFrame(resp_grid["data"])
             df_rev = df_edited.rename(columns={v: k for k, v in RENAME.items()})
             df_antes = _load("empresas_controle", "ativo=1")
             _save_grid(df_rev, "empresas_controle")
             _log_alteracoes_empresa(df_antes, df_rev)
-            # Aguarda o banco finalizar e sincroniza alterações
             time.sleep(2)
-            df_alt = _load("alteracao_empresa")
-            ok = _sheets_salvar("alteracao_empresa", df_alt)
-            st.success(f"✅ Salvo! Alterações no Sheets: {ok} | Registros: {len(df_alt)}")
+            _sincronizar_sheets("alteracao_empresa")
+            st.success("✅ Salvo e sincronizado!")
             st.rerun()
-
     with col_d:
         _download_btn(df_show.drop(columns=["id"], errors="ignore"), "empresas_controle", "emp")
 
     if _GESTOR:
         st.divider()
         st.markdown("#### 🗑️ Excluir Empresa")
-        opcoes = {f"{r['cod']} — {r['razao_social']}": r
-                  for _, r in df.iterrows()}
+        opcoes = {f"{r['cod']} — {r['razao_social']}": r for _, r in df.iterrows()}
         sel_label = st.selectbox("Selecione a empresa para excluir:",
-                                 ["— selecione —"] + list(opcoes.keys()),
-                                 key="sel_exc_emp")
+                                 ["— selecione —"] + list(opcoes.keys()), key="sel_exc_emp")
         if sel_label != "— selecione —":
             r = opcoes[sel_label]
             st.warning(f"Empresa selecionada: **{r['razao_social']}** | CNPJ: {r['cnpj']}")
             if st.button("Confirmar Exclusão", key="btn_exc_emp", type="secondary"):
                 conn = get_conn()
                 conn.execute("UPDATE empresas_controle SET ativo=0 WHERE cod=?", (r["cod"],))
-                conn.execute("""INSERT INTO alteracao_empresa(tipo,cod,razao_social,cnpj,usuario)
-                    VALUES('EXCLUSÃO',?,?,?,?)""", (r["cod"], r["razao_social"], r["cnpj"], _NIVEL))
+                conn.execute(
+                    "INSERT INTO alteracao_empresa(tipo,cod,razao_social,cnpj,usuario) VALUES(?,?,?,?,?)",
+                    ("EXCLUSAO", r["cod"], r["razao_social"], r["cnpj"], _NIVEL)
+                )
                 conn.commit()
                 conn.close()
                 _sincronizar_sheets("empresas_controle")
                 _sincronizar_sheets("alteracao_empresa")
-                st.success(f"Empresa '{r['razao_social']}' excluída com sucesso.")
+                st.success(f"Empresa '{r['razao_social']}' excluída.")
                 st.rerun()
 
 # ============================================================================
@@ -917,11 +856,7 @@ def pagina_empresas_ctrl():
 def pagina_calendario():
     st.markdown("<h2 style='color:#1d3f77;'>CALENDÁRIO</h2>", unsafe_allow_html=True)
 
-    hoje = datetime.now()
-    comp_sel = st.text_input("Competência (MM/AAAA)",
-                             value=f"{(hoje.replace(day=1) - __import__("datetime").timedelta(days=1)).month:02d}/{(hoje.replace(day=1) - __import__("datetime").timedelta(days=1)).year}", key="cal_comp")
-
-    st.markdown("### Resumo da Competência")
+    comp_sel = st.text_input("Competência (MM/AAAA)", value=_comp_anterior(), key="cal_comp")
 
     tabelas = [
         ("Municipal",        "controle_municipal"),
@@ -933,11 +868,10 @@ def pagina_calendario():
     cols = st.columns(len(tabelas))
     for i, (nome, tbl) in enumerate(tabelas):
         df = _load(tbl, "competencia=?", (comp_sel,))
-        total  = len(df)
-        conc   = (df["status"] == "Concluído").sum() if not df.empty and "status" in df.columns else 0
-        pend   = (df["status"] == "Pendente").sum()  if not df.empty and "status" in df.columns else 0
-        outros = total - conc - pend
-        pct_c  = round(conc / total * 100) if total else 0
+        total = len(df)
+        conc  = (df["status"] == "Concluído").sum() if not df.empty and "status" in df.columns else 0
+        pend  = (df["status"] == "Pendente").sum()  if not df.empty and "status" in df.columns else 0
+        pct_c = round(conc / total * 100) if total else 0
 
         with cols[i]:
             cor_bg = "#d5f5e3" if pct_c >= 80 else "#fadbd8" if pct_c < 50 else "#fef9e7"
@@ -947,15 +881,12 @@ def pagina_calendario():
                         text-align:center; border:1px solid {cor_tx}22;'>
                 <b style='color:#1d3f77; font-size:14px;'>{nome}</b><br>
                 <span style='font-size:28px; font-weight:700; color:{cor_tx};'>{pct_c}%</span><br>
-                <span style='font-size:12px; color:#555;'>
-                    Concluído: {conc} | Pendente: {pend} | Total: {total}
-                </span>
+                <span style='font-size:12px; color:#555;'>Concluído: {conc} | Pendente: {pend} | Total: {total}</span>
             </div>
             """, unsafe_allow_html=True)
 
     st.divider()
     st.markdown("### Pendências do Mês")
-
     pendentes = []
     for nome, tbl in tabelas:
         df = _load(tbl, "competencia=? AND status='Pendente'", (comp_sel,))
@@ -978,17 +909,14 @@ _EDIT_GESTOR_MUNI  = ["apuracao_dms","iss_proprio","fechado_dms","apuracao_rest"
                       "iss_retido","fechado_rest","observacao","conferencia",
                       "observacoes_geral","responsavel","status","motivo_pendencia"]
 _EDIT_FISCAL_MUNI  = ["status","motivo_pendencia","observacoes_geral"]
-
 _EDIT_GESTOR_EST   = ["apuracao","guia_icms","guia_protege","fechado","sped_fiscal",
                       "conferencia","observacoes","responsavel","status","motivo_pendencia"]
 _EDIT_FISCAL_EST   = ["status","motivo_pendencia","observacoes"]
-
 _EDIT_GESTOR_FED   = ["apuracao","guia","fechado","sped_contribuicoes","dirbi",
                       "data_envio_dirbi","mit","data_envio_mit","reinf","observacao",
                       "relatorio_fiscal","diagnostico_fiscal","situacao_pendencia",
                       "responsavel","status","motivo_pendencia"]
 _EDIT_FISCAL_FED   = ["status","motivo_pendencia","observacao"]
-
 _EDIT_GESTOR_SN    = ["apuracao_dms","sn","das","fechado","reinf","conferencia",
                       "observacao","relatorio_fiscal","diagnostico_fiscal",
                       "responsavel","status","motivo_pendencia"]
@@ -996,18 +924,14 @@ _EDIT_FISCAL_SN    = ["status","motivo_pendencia","observacao"]
 
 _COLS_MUNI = ["cod","razao_social","cnpj","regime","im","uf","municipio","responsavel",
               "apuracao_dms","iss_proprio","fechado_dms","apuracao_rest","iss_retido",
-              "fechado_rest","observacao","conferencia","observacoes_geral",
-              "status","motivo_pendencia"]
-
+              "fechado_rest","observacao","conferencia","observacoes_geral","status","motivo_pendencia"]
 _COLS_EST  = ["cod","razao_social","cnpj","regime","ie","uf","municipio","responsavel",
               "apuracao","guia_icms","guia_protege","fechado","sped_fiscal",
               "conferencia","observacoes","status","motivo_pendencia"]
-
 _COLS_FED  = ["cod","razao_social","cnpj","regime","uf","municipio","responsavel",
               "apuracao","guia","fechado","sped_contribuicoes","dirbi","data_envio_dirbi",
               "mit","data_envio_mit","reinf","observacao","relatorio_fiscal",
               "diagnostico_fiscal","situacao_pendencia","status","motivo_pendencia"]
-
 _COLS_SN   = ["cod","razao_social","cnpj","ie","im","uf","municipio","responsavel",
               "apuracao_dms","sn","das","fechado","reinf","conferencia","observacao",
               "relatorio_fiscal","diagnostico_fiscal","status","motivo_pendencia"]
@@ -1087,15 +1011,13 @@ def pagina_parcelamentos():
         "email":"E-MAIL","observacao2":"OBSERVAÇÃO 2",
     }
     df_show = df.rename(columns=RENAME).fillna("")
-
     edit_p = list(RENAME.values()) if _GESTOR else ["STATUS","OBSERVAÇÃO","OBSERVAÇÃO 2"]
     resp = _build_grid(df_show, edit_cols=edit_p, key="grid_parc")
 
     col_s, col_d = st.columns([1, 3])
     with col_s:
         if st.button("💾 Salvar", type="primary", key="save_parc"):
-            df_ed = pd.DataFrame(resp["data"])
-            df_ed = df_ed.rename(columns={v: k for k, v in RENAME.items()})
+            df_ed = pd.DataFrame(resp["data"]).rename(columns={v: k for k, v in RENAME.items()})
             _save_grid(df_ed, "parcelamentos")
             st.success("✅ Salvo e sincronizado!")
             st.rerun()
@@ -1158,8 +1080,7 @@ def pagina_senhas():
     col_s, col_d = st.columns([1, 3])
     with col_s:
         if st.button("💾 Salvar", type="primary", key="save_sen"):
-            df_ed = pd.DataFrame(resp["data"])
-            df_ed = df_ed.rename(columns={v: k for k, v in RENAME.items()})
+            df_ed = pd.DataFrame(resp["data"]).rename(columns={v: k for k, v in RENAME.items()})
             _save_grid(df_ed, "senhas_acessos")
             st.success("✅ Salvo e sincronizado!")
             st.rerun()
@@ -1188,18 +1109,14 @@ def _auto_populate_obrigacoes(comp):
     conn = get_conn()
     for uf, obrs in _OBRIG_SIMPLES.items():
         for ob in obrs:
-            conn.execute("""
-            INSERT OR IGNORE INTO obrigacoes_prazos
-            (competencia, regime, uf, obrigacao)
-            VALUES (?, 'SIMPLES NACIONAL', ?, ?)
-            """, (comp, uf, ob))
+            conn.execute("""INSERT OR IGNORE INTO obrigacoes_prazos
+            (competencia, regime, uf, obrigacao) VALUES (?, 'SIMPLES NACIONAL', ?, ?)""",
+            (comp, uf, ob))
     for uf, obrs in _OBRIG_PRESUMIDO.items():
         for ob in obrs:
-            conn.execute("""
-            INSERT OR IGNORE INTO obrigacoes_prazos
-            (competencia, regime, uf, obrigacao)
-            VALUES (?, 'PRESUMIDO/REAL', ?, ?)
-            """, (comp, uf, ob))
+            conn.execute("""INSERT OR IGNORE INTO obrigacoes_prazos
+            (competencia, regime, uf, obrigacao) VALUES (?, 'PRESUMIDO/REAL', ?, ?)""",
+            (comp, uf, ob))
     conn.commit()
     conn.close()
 
@@ -1207,9 +1124,7 @@ def _auto_populate_obrigacoes(comp):
 def pagina_obrigacoes():
     st.markdown("<h2 style='color:#1d3f77;'>OBRIGAÇÕES E PRAZOS</h2>", unsafe_allow_html=True)
 
-    hoje = datetime.now()
-    comp = st.text_input("Competência (MM/AAAA)",
-                         value=f"{(hoje.replace(day=1) - __import__("datetime").timedelta(days=1)).month:02d}/{(hoje.replace(day=1) - __import__("datetime").timedelta(days=1)).year}", key="obr_comp")
+    comp = st.text_input("Competência (MM/AAAA)", value=_comp_anterior(), key="obr_comp")
 
     _auto_populate_obrigacoes(comp)
     df_all = _load("obrigacoes_prazos", "competencia=?", (comp,))
@@ -1225,10 +1140,8 @@ def pagina_obrigacoes():
             if df_sn.empty:
                 continue
             st.markdown(f"**Estado: {uf}**" if uf != "TODOS" else "**Todos os Estados**")
-            RENAME_O = {
-                "obrigacao":"OBRIGAÇÃO","responsavel":"RESPONSÁVEL","prazo":"PRAZO",
-                "data_realizado":"REALIZADO","status":"STATUS","motivo_pendencia":"MOTIVO",
-            }
+            RENAME_O = {"obrigacao":"OBRIGAÇÃO","responsavel":"RESPONSÁVEL","prazo":"PRAZO",
+                        "data_realizado":"REALIZADO","status":"STATUS","motivo_pendencia":"MOTIVO"}
             df_sn_show = df_sn[["id"] + list(RENAME_O.keys())].rename(columns=RENAME_O).fillna("")
             resp = _build_grid(df_sn_show,
                                edit_cols=[RENAME_O[k] for k in edit_obr if k in RENAME_O],
@@ -1245,10 +1158,8 @@ def pagina_obrigacoes():
             if df_pr.empty:
                 continue
             st.markdown(f"**Estado: {uf}**")
-            RENAME_O = {
-                "obrigacao":"OBRIGAÇÃO","responsavel":"RESPONSÁVEL","prazo":"PRAZO",
-                "data_realizado":"REALIZADO","status":"STATUS","motivo_pendencia":"MOTIVO",
-            }
+            RENAME_O = {"obrigacao":"OBRIGAÇÃO","responsavel":"RESPONSÁVEL","prazo":"PRAZO",
+                        "data_realizado":"REALIZADO","status":"STATUS","motivo_pendencia":"MOTIVO"}
             df_pr_show = df_pr[["id"] + list(RENAME_O.keys())].rename(columns=RENAME_O).fillna("")
             resp = _build_grid(df_pr_show,
                                edit_cols=[RENAME_O[k] for k in edit_obr if k in RENAME_O],
@@ -1267,9 +1178,7 @@ def pagina_painel():
     import plotly.graph_objects as go
     st.markdown("<h2 style='color:#1d3f77;'>PAINEL DE CONTROLE</h2>", unsafe_allow_html=True)
 
-    hoje = datetime.now()
-    comp = st.text_input("Competência (MM/AAAA)",
-                         value=f"{(hoje.replace(day=1) - __import__("datetime").timedelta(days=1)).month:02d}/{(hoje.replace(day=1) - __import__("datetime").timedelta(days=1)).year}", key="pain_comp")
+    comp = st.text_input("Competência (MM/AAAA)", value=_comp_anterior(), key="pain_comp")
 
     tabelas = [
         ("Municipal",        "controle_municipal"),
@@ -1281,16 +1190,13 @@ def pagina_painel():
 
     dados = []
     for nome, tbl in tabelas:
-        where = "competencia=?" if tbl != "parcelamentos" else ""
-        params = (comp,) if where else ()
-        df = _load(tbl, where, params)
+        df = _load(tbl, "competencia=?", (comp,))
         total = len(df)
         conc  = (df["status"] == "Concluído").sum() if not df.empty and "status" in df.columns else 0
         pend  = (df["status"] == "Pendente").sum()  if not df.empty and "status" in df.columns else 0
-        dados.append({"Menu": nome, "Total": total, "Concluído": int(conc), "Pendente": int(pend),
-                      "Sem Status": int(total - conc - pend)})
+        dados.append({"Menu": nome, "Total": total, "Concluído": int(conc),
+                      "Pendente": int(pend), "Sem Status": int(total - conc - pend)})
 
-    st.markdown("### Resumo por Menu")
     CARD_COLS = st.columns(len(dados))
     for i, d in enumerate(dados):
         pct = round(d["Concluído"] / d["Total"] * 100) if d["Total"] else 0
@@ -1301,44 +1207,30 @@ def pagina_painel():
                         text-align:center; border-top:4px solid {cor};'>
                 <b style='color:#1d3f77; font-size:13px;'>{d["Menu"]}</b><br>
                 <span style='font-size:26px; font-weight:700; color:{cor};'>{pct}%</span><br>
-                <span style='font-size:11px; color:#555;'>
-                    ✅ {d["Concluído"]} | ⚠️ {d["Pendente"]} | — {d["Sem Status"]}
-                </span>
+                <span style='font-size:11px; color:#555;'>✅ {d["Concluído"]} | ⚠️ {d["Pendente"]} | — {d["Sem Status"]}</span>
             </div>
             """, unsafe_allow_html=True)
 
     st.divider()
-
     df_resumo = pd.DataFrame(dados)
     fig = go.Figure()
-    fig.add_trace(go.Bar(name="Concluído", x=df_resumo["Menu"],
-                         y=df_resumo["Concluído"], marker_color="#27ae60"))
-    fig.add_trace(go.Bar(name="Pendente",  x=df_resumo["Menu"],
-                         y=df_resumo["Pendente"],  marker_color="#e74c3c"))
-    fig.add_trace(go.Bar(name="Sem Status", x=df_resumo["Menu"],
-                         y=df_resumo["Sem Status"], marker_color="#bdc3c7"))
-    fig.update_layout(
-        barmode="stack", height=350,
-        paper_bgcolor="white", plot_bgcolor="white",
-        legend=dict(orientation="h", y=1.1),
-        margin=dict(t=20, b=20, l=10, r=10),
-        xaxis=dict(showgrid=False), yaxis=dict(showgrid=True, gridcolor="#f0f0f0"),
-    )
+    fig.add_trace(go.Bar(name="Concluído",  x=df_resumo["Menu"], y=df_resumo["Concluído"],  marker_color="#27ae60"))
+    fig.add_trace(go.Bar(name="Pendente",   x=df_resumo["Menu"], y=df_resumo["Pendente"],   marker_color="#e74c3c"))
+    fig.add_trace(go.Bar(name="Sem Status", x=df_resumo["Menu"], y=df_resumo["Sem Status"], marker_color="#bdc3c7"))
+    fig.update_layout(barmode="stack", height=350, paper_bgcolor="white", plot_bgcolor="white",
+                      legend=dict(orientation="h", y=1.1), margin=dict(t=20, b=20, l=10, r=10),
+                      xaxis=dict(showgrid=False), yaxis=dict(showgrid=True, gridcolor="#f0f0f0"))
     st.plotly_chart(fig, use_container_width=True, key="chart_painel")
 
     st.divider()
-
     st.markdown("### Pendências Detalhadas")
     pendentes = []
     for nome, tbl in tabelas:
-        where = "competencia=? AND status='Pendente'" if tbl != "parcelamentos" else "status_parcelamento='Pendente'"
-        params = (comp,) if tbl != "parcelamentos" else ()
-        df = _load(tbl, where, params)
+        df = _load(tbl, "competencia=? AND status='Pendente'", (comp,))
         if not df.empty:
             df["_menu"] = nome
             cols_disp = [c for c in ["_menu","cod","razao_social","responsavel","motivo_pendencia"] if c in df.columns]
             pendentes.append(df[cols_disp])
-
     if pendentes:
         df_pend = pd.concat(pendentes, ignore_index=True)
         df_pend.columns = [c.replace("_menu","Menu").replace("cod","Cód")
@@ -1375,8 +1267,11 @@ def pagina_alteracao():
 
     tipo_style = JsCode("""
     function(params) {
-        if (params.data['TIPO'] === 'INCLUSÃO') return {background:'#d5f5e3', color:'#186a3b'};
-        if (params.data['TIPO'] === 'EXCLUSÃO') return {background:'#fadbd8', color:'#922b21'};
+        if (!params.data) return {};
+        var t = params.data['TIPO'] || '';
+        if (t === 'INCLUSAO') return {background:'#d5f5e3', color:'#186a3b'};
+        if (t === 'EXCLUSAO') return {background:'#fadbd8', color:'#922b21'};
+        if (t === 'ALTERACAO') return {background:'#fef9e7', color:'#7d6608'};
         return {};
     }""")
 
@@ -1391,12 +1286,12 @@ def pagina_alteracao():
     col_s, col_d = st.columns([1, 3])
     with col_s:
         if st.button("☁️ Sincronizar com Sheets", type="primary", key="sync_alt_emp"):
-            df_alt_full = _load("alteracao_empresa")
-            ok = _sheets_salvar("alteracao_empresa", df_alt_full)
+            df_full = _load("alteracao_empresa")
+            ok = _sheets_salvar("alteracao_empresa", df_full)
             if ok:
-                st.success("✅ Sincronizado com sucesso!")
+                st.success("✅ Sincronizado!")
             else:
-                st.error("❌ Falhou. Verifique as credenciais.")
+                st.error("❌ Falhou.")
     with col_d:
         _download_btn(df_show, "alteracao_empresa", "alt_emp")
 
@@ -1406,49 +1301,27 @@ def pagina_alteracao():
 
 if pagina == "EMPRESAS":
     pagina_empresas_ctrl()
-
 elif pagina == "CALENDÁRIO":
     pagina_calendario()
-
 elif pagina == "MUNICIPAL":
-    _menu_controle(
-        "MUNICIPAL", "controle_municipal",
-        lambda df: df,
-        _COLS_MUNI, _EDIT_GESTOR_MUNI, _EDIT_FISCAL_MUNI, "municipal",
-    )
-
+    _menu_controle("MUNICIPAL", "controle_municipal", lambda df: df,
+                   _COLS_MUNI, _EDIT_GESTOR_MUNI, _EDIT_FISCAL_MUNI, "municipal")
 elif pagina == "ESTADUAL":
-    _menu_controle(
-        "ESTADUAL", "controle_estadual",
-        _filtro_est,
-        _COLS_EST, _EDIT_GESTOR_EST, _EDIT_FISCAL_EST, "estadual",
-    )
-
+    _menu_controle("ESTADUAL", "controle_estadual", _filtro_est,
+                   _COLS_EST, _EDIT_GESTOR_EST, _EDIT_FISCAL_EST, "estadual")
 elif pagina == "FEDERAL":
-    _menu_controle(
-        "FEDERAL", "controle_federal",
-        _filtro_fed,
-        _COLS_FED, _EDIT_GESTOR_FED, _EDIT_FISCAL_FED, "federal",
-    )
-
+    _menu_controle("FEDERAL", "controle_federal", _filtro_fed,
+                   _COLS_FED, _EDIT_GESTOR_FED, _EDIT_FISCAL_FED, "federal")
 elif pagina == "SIMPLES NACIONAL":
-    _menu_controle(
-        "SIMPLES NACIONAL", "controle_simples",
-        _filtro_sn,
-        _COLS_SN, _EDIT_GESTOR_SN, _EDIT_FISCAL_SN, "simples",
-    )
-
+    _menu_controle("SIMPLES NACIONAL", "controle_simples", _filtro_sn,
+                   _COLS_SN, _EDIT_GESTOR_SN, _EDIT_FISCAL_SN, "simples")
 elif pagina == "PARCELAMENTOS":
     pagina_parcelamentos()
-
 elif pagina == "SENHAS E ACESSOS":
     pagina_senhas()
-
 elif pagina == "OBRIGAÇÕES E PRAZOS":
     pagina_obrigacoes()
-
 elif pagina == "PAINEL DE CONTROLE":
     pagina_painel()
-
 elif pagina == "ALTERAÇÃO DE EMPRESA":
     pagina_alteracao()
