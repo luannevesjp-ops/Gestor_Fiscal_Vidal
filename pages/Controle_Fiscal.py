@@ -865,13 +865,14 @@ def pagina_empresas_ctrl():
     col_s, col_d = st.columns([1, 3])
     with col_s:
         if _GESTOR and st.button("💾 Salvar Alterações", type="primary", key="save_emp"):
+            import time
             df_edited = pd.DataFrame(resp_grid["data"])
             df_rev = df_edited.rename(columns={v: k for k, v in RENAME.items()})
             df_antes = _load("empresas_controle", "ativo=1")
             _save_grid(df_rev, "empresas_controle")
             _log_alteracoes_empresa(df_antes, df_rev)
-            # Garante sincronização de ambas as tabelas após salvar
-            _sincronizar_sheets("empresas_controle")
+            # Aguarda o banco finalizar e sincroniza alterações
+            time.sleep(2)
             _sincronizar_sheets("alteracao_empresa")
             st.success("✅ Salvo e sincronizado!")
             st.rerun()
