@@ -26,7 +26,7 @@ _ABA = {
     "controle_simples":   "SIMPLES NACIONAL",
     "parcelamentos":      "PARCELAMENTOS",
     "senhas_acessos":     "SENHAS E ACESSOS",
-    "alteracao_empresa":  "ALTERACOES",
+    "alteracao_empresa":  "BACKUP",
     "obrigacoes_prazos":  "OBRIGAÇÕES E PRAZOS",
 }
 
@@ -1358,9 +1358,6 @@ def pagina_alteracao():
     st.markdown("<p style='color:#666;'>Registro automático de todas as inclusões e exclusões de empresas.</p>",
                 unsafe_allow_html=True)
 
-    # Sempre restaura do Sheets se vazio
-    if _load("alteracao_empresa").empty:
-        _sheets_restaurar("alteracao_empresa")
     df = _load("alteracao_empresa")
     if df.empty:
         st.info("Nenhuma alteração registrada.")
