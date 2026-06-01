@@ -40,6 +40,22 @@ st.set_page_config(page_title="LUATECH - CONTROLE FISCAL", layout="wide")
 st.markdown("""
 <style>
 [data-testid="stSidebarNav"] { display: none !important; }
+
+/* Cabeçalho do AgGrid — fundo azul escuro, letra branca e negrito */
+.ag-header-cell-text {
+    color: white !important;
+    font-weight: bold !important;
+    font-size: 12px !important;
+}
+.ag-header-cell {
+    background-color: #1d3f77 !important;
+}
+.ag-header-group-cell {
+    background-color: #1d3f77 !important;
+}
+.ag-floating-filter {
+    background-color: #e8eef7 !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -603,56 +619,28 @@ def _inserir_controle(c, table, comp, emp):
          e("uf"), e("municipio"), e("responsavel_fiscal")))
 
 
-_HEADER_STYLE = JsCode("""
-function(params) {
-    return {
-        backgroundColor: '#1d3f77',
-        color: 'white',
-        fontWeight: 'bold',
-        fontSize: '12px'
-    };
-}
-""")
-
-def _fmt_header(col):
-    """Formata nome da coluna: Title Case."""
-    return col.replace("_", " ").title()
-
 def _build_grid(df, edit_cols=None, height=450, key="grid", selection=False):
-    # Renomeia colunas para Title Case antes de construir o grid
-    rename_map = {col: _fmt_header(col) for col in df.columns
-                  if col not in ("id", "competencia")}
-    df_fmt = df.rename(columns=rename_map)
-    # Ajusta edit_cols para os novos nomes
-    if edit_cols:
-        edit_cols = [rename_map.get(c, c) for c in edit_cols]
-
-    gb = GridOptionsBuilder.from_dataframe(df_fmt)
+    gb = GridOptionsBuilder.from_dataframe(df)
     gb.configure_default_column(
-        resizable=True, filter=True, sortable=True, editable=False, minWidth=100,
-        headerComponentParams={"template":
-            '<div class="ag-cell-label-container" role="presentation" style="background:#1d3f77;color:white;font-weight:bold;padding:4px;">'
-            '<span ref="eText" class="ag-header-cell-text"></span></div>'}
+        resizable=True, filter=True, sortable=True, editable=False, minWidth=100
     )
     if selection:
         gb.configure_selection(selection_mode="single", use_checkbox=True)
 
-    for col in df_fmt.columns:
-        orig = col
-        if orig == "id" or orig == "competencia" or orig == "Id" or orig == "Competencia":
-            gb.configure_column(orig, hide=True)
-        elif edit_cols and orig in edit_cols:
-            if orig == rename_map.get("status", "Status"):
-                gb.configure_column(orig, editable=True, width=140,
+    for col in df.columns:
+        if col == "id" or col == "competencia":
+            gb.configure_column(col, hide=True)
+        elif edit_cols and col in edit_cols:
+            if col == "status":
+                gb.configure_column(col, editable=True, width=140,
                                     cellEditor="agSelectCellEditor",
                                     cellEditorParams={"values": _STATUS_OPCOES})
-            elif orig == rename_map.get("motivo_pendencia", "Motivo Pendencia"):
-                gb.configure_column(orig, editable=True, width=220)
+            elif col == "motivo_pendencia":
+                gb.configure_column(col, editable=True, width=220)
             else:
-                gb.configure_column(orig, editable=True)
-        elif orig in (rename_map.get("cod","Cod"), rename_map.get("razao_social","Razao Social")):
-            gb.configure_column(orig, pinned="left",
-                                width=160 if "Social" in orig else 80)
+                gb.configure_column(col, editable=True)
+        elif col in ("cod", "razao_social"):
+            gb.configure_column(col, pinned="left", width=160 if col == "razao_social" else 80)
 
     gb.configure_grid_options(
         domLayout="normal", floatingFilter=True,
@@ -664,18 +652,12 @@ def _build_grid(df, edit_cols=None, height=450, key="grid", selection=False):
         mode = GridUpdateMode.VALUE_CHANGED | GridUpdateMode.SELECTION_CHANGED
     else:
         mode = GridUpdateMode.VALUE_CHANGED
-
-    grid_resp = AgGrid(
-        df_fmt, gridOptions=gb.build(), height=height, key=key,
+    return AgGrid(
+        df, gridOptions=gb.build(), height=height, key=key,
         fit_columns_on_grid_load=False, enable_enterprise_modules=False,
         update_mode=mode,
         allow_unsafe_jscode=True, reload_data=False,
     )
-    # Reverte rename para manter compatibilidade com o restante do código
-    if grid_resp["data"] is not None:
-        rev_map = {v: k for k, v in rename_map.items()}
-        grid_resp["data"] = pd.DataFrame(grid_resp["data"]).rename(columns=rev_map)
-    return grid_resp
 
 
 def _filtros_comp_resp(df, key):
