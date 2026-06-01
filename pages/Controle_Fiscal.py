@@ -329,17 +329,22 @@ def _sheets_salvar(table_name, df):
     """Envia dados para a aba correspondente via Apps Script."""
     url = _script_url()
     if not url:
+        print(f"[SHEETS] URL vazia para {table_name}")
         return False
     aba = _ABA.get(table_name, table_name)
     df_s = df.copy().astype(str)
     df_s = df_s.replace("nan", "").replace("None", "").replace("NaT", "")
     dados = [df_s.columns.tolist()] + df_s.values.tolist()
     try:
+        print(f"[SHEETS] Enviando {table_name} → aba '{aba}' | {len(dados)-1} linhas")
         r = requests.post(url,
                           json={"token": _script_token(), "aba": aba, "dados": dados},
                           allow_redirects=True, timeout=30)
-        return r.json().get("ok", False)
-    except Exception:
+        resultado = r.json()
+        print(f"[SHEETS] Resposta {table_name}: {resultado}")
+        return resultado.get("ok", False)
+    except Exception as ex:
+        print(f"[SHEETS] ERRO {table_name}: {ex}")
         return False
 
 
@@ -1380,7 +1385,16 @@ def pagina_alteracao():
            enable_enterprise_modules=False, update_mode=GridUpdateMode.NO_UPDATE,
            allow_unsafe_jscode=True)
 
-    _download_btn(df_show, "alteracao_empresa", "alt_emp")
+    col_s, col_d = st.columns([1, 3])
+    with col_s:
+        if st.button("☁️ Sincronizar com Sheets", type="primary", key="sync_alt_emp"):
+            ok = _sheets_salvar("alteracao_empresa", df_show)
+            if ok:
+                st.success("✅ Sincronizado com sucesso!")
+            else:
+                st.error("❌ Falhou. Verifique as credenciais.")
+    with col_d:
+        _download_btn(df_show, "alteracao_empresa", "alt_emp")
 
 # ============================================================================
 # ROTEAMENTO
