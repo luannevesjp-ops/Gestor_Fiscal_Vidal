@@ -482,16 +482,22 @@ def _log_alteracoes_empresa(df_antes, df_depois):
             if v_a != v_n:
                 diffs.append(f"{nome}: '{v_a}' -> '{v_n}'")
         if diffs:
-            conn.execute("""
-                INSERT INTO alteracao_empresa
-                    (tipo, cod, razao_social, cnpj, usuario, observacao)
-                VALUES ('ALTERAÇÃO', ?, ?, ?, ?, ?)
-            """, (str(row_a.get("cod", "")),
-                  str(row_a.get("razao_social", "")),
-                  str(row_a.get("cnpj", "")),
-                  _NIVEL,
-                  " | ".join(diffs)))
-    conn.commit()
+            try:
+                conn.execute("""
+                    INSERT INTO alteracao_empresa
+                        (tipo, cod, razao_social, cnpj, usuario, observacao)
+                    VALUES ('ALTERACAO', ?, ?, ?, ?, ?)
+                """, (str(row_a.get("cod", "")),
+                      str(row_a.get("razao_social", "")),
+                      str(row_a.get("cnpj", "")),
+                      str(_NIVEL),
+                      " | ".join(diffs)))
+            except Exception:
+                pass
+    try:
+        conn.commit()
+    except Exception:
+        pass
     conn.close()
 
 
