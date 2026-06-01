@@ -876,6 +876,9 @@ def pagina_empresas_ctrl():
             df_antes = _load("empresas_controle", "ativo=1")
             _save_grid(df_rev, "empresas_controle")
             _log_alteracoes_empresa(df_antes, df_rev)
+            # Garante sincronização de ambas as tabelas após salvar
+            _sincronizar_sheets("empresas_controle")
+            _sincronizar_sheets("alteracao_empresa")
             st.success("✅ Salvo e sincronizado!")
             st.rerun()
 
