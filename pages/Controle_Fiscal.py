@@ -384,17 +384,16 @@ def _restaurar_se_vazio(table_name):
         _sheets_restaurar(table_name)
 
 
-import threading
-
-def _sincronizar_sheets(table_name):
-    """Sincroniza em background — não bloqueia a interface."""
-    def _enviar():
-        try:
-            df_full = _load(table_name)
-            _sheets_salvar(table_name, df_full)
-        except Exception:
-            pass
-    threading.Thread(target=_enviar, daemon=True).start()
+def _sincronizar_sheets(table_name, sync=False):
+    """Sincroniza com Google Sheets.
+    sync=True  → síncrono (aguarda resposta) — use ao salvar dados importantes
+    sync=False → apenas tenta, sem bloquear
+    """
+    try:
+        df_full = _load(table_name)
+        _sheets_salvar(table_name, df_full)
+    except Exception:
+        pass
 
 
 # Restaura do Sheets apenas UMA vez por sessão
