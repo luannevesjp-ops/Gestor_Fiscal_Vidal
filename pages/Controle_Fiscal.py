@@ -384,13 +384,17 @@ def _restaurar_se_vazio(table_name):
         _sheets_restaurar(table_name)
 
 
+import threading
+
 def _sincronizar_sheets(table_name):
-    """Sincroniza tabela completa com Google Sheets em background (não bloqueia)."""
-    try:
-        df_full = _load(table_name)
-        _sheets_salvar(table_name, df_full)
-    except Exception:
-        pass  # Nunca bloqueia o fluxo principal
+    """Sincroniza em background — não bloqueia a interface."""
+    def _enviar():
+        try:
+            df_full = _load(table_name)
+            _sheets_salvar(table_name, df_full)
+        except Exception:
+            pass
+    threading.Thread(target=_enviar, daemon=True).start()
 
 
 # Na inicialização: restaura todas as tabelas do backup se necessário
