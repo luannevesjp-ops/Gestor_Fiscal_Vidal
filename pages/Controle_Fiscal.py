@@ -1383,8 +1383,9 @@ def pagina_alteracao():
         "razao_social":"RAZÃO SOCIAL","cnpj":"CNPJ",
         "usuario":"USUÁRIO","observacao":"OBSERVAÇÃO",
     }
-    df_show = df[[c for c in RENAME if c in df.columns]].rename(columns=RENAME).fillna("")
+    df_show = df[[c for c in RENAME if c in df.columns]].fillna("")
     df_show = df_show.sort_values("data_hora", ascending=False)
+    df_show = df_show.rename(columns=RENAME)
 
     tipo_style = JsCode("""
     function(params) {
