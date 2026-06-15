@@ -1206,28 +1206,75 @@ def pagina_parcelamentos():
     df = _load("parcelamentos")
     if df.empty:
         st.info("Nenhum parcelamento cadastrado.")
-        return
+    else:
+        RENAME = {
+            "cod":"CÓD","razao_social":"RAZÃO SOCIAL","cnpj":"CNPJ",
+            "municipal":"MUNICIPAL","estadual":"ESTADUAL","rfb_federal":"RFB (FEDERAL)",
+            "pgfn_federal":"PGFN (FEDERAL)","status_parcelamento":"STATUS",
+            "data_parcelamento":"DATA","observacao":"OBSERVAÇÃO",
+            "email":"E-MAIL","observacao2":"OBSERVAÇÃO 2",
+        }
+        df_show = df.rename(columns=RENAME).fillna("")
+        edit_p = list(RENAME.values()) if _GESTOR else ["STATUS","OBSERVAÇÃO","OBSERVAÇÃO 2"]
+        resp = _build_grid(df_show, edit_cols=edit_p, key="grid_parc")
 
-    RENAME = {
-        "cod":"CÓD","razao_social":"RAZÃO SOCIAL","cnpj":"CNPJ",
-        "municipal":"MUNICIPAL","estadual":"ESTADUAL","rfb_federal":"RFB (FEDERAL)",
-        "pgfn_federal":"PGFN (FEDERAL)","status_parcelamento":"STATUS",
-        "data_parcelamento":"DATA","observacao":"OBSERVAÇÃO",
-        "email":"E-MAIL","observacao2":"OBSERVAÇÃO 2",
-    }
-    df_show = df.rename(columns=RENAME).fillna("")
-    edit_p = list(RENAME.values()) if _GESTOR else ["STATUS","OBSERVAÇÃO","OBSERVAÇÃO 2"]
-    resp = _build_grid(df_show, edit_cols=edit_p, key="grid_parc")
+        col_s, col_d = st.columns([1, 3])
+        with col_s:
+            if st.button("💾 Salvar", type="primary", key="save_parc"):
+                df_ed = pd.DataFrame(resp["data"]).rename(columns={v: k for k, v in RENAME.items()})
+                _save_grid(df_ed, "parcelamentos")
+                st.success("✅ Salvo e sincronizado!")
+                st.rerun()
+        with col_d:
+            _download_btn(df_show.drop(columns=["id"], errors="ignore"), "parcelamentos", "parc")
 
-    col_s, col_d = st.columns([1, 3])
-    with col_s:
-        if st.button("💾 Salvar", type="primary", key="save_parc"):
-            df_ed = pd.DataFrame(resp["data"]).rename(columns={v: k for k, v in RENAME.items()})
-            _save_grid(df_ed, "parcelamentos")
-            st.success("✅ Salvo e sincronizado!")
-            st.rerun()
-    with col_d:
-        _download_btn(df_show.drop(columns=["id"], errors="ignore"), "parcelamentos", "parc")
+    with st.expander("🔍 Diagnóstico de sincronização — PARCELAMENTOS", expanded=False):
+        st.markdown("Use os botões abaixo para inspecionar e corrigir a sincronização com o Google Sheets.")
+
+        col_a, col_b = st.columns(2)
+
+        with col_a:
+            if st.button("1. Ver dados do Sheets", key="diag_parc_ler"):
+                df_sh = _sheets_carregar("parcelamentos")
+                if df_sh.empty:
+                    st.error("Sheets retornou vazio ou a aba 'PARCELAMENTOS' não existe / não tem dados.")
+                else:
+                    st.success(f"Sheets retornou {len(df_sh)} linha(s).")
+                    st.write("**Colunas no Sheets:**", df_sh.columns.tolist())
+                    conn = get_conn()
+                    schema_cols = [r[1] for r in conn.execute("PRAGMA table_info(parcelamentos)").fetchall()]
+                    conn.close()
+                    st.write("**Colunas no SQLite:**", schema_cols)
+                    comuns = [c for c in df_sh.columns if c in schema_cols and c != "id"]
+                    st.write("**Colunas em comum (serão carregadas):**", comuns if comuns else "⚠️ NENHUMA — os nomes não batem!")
+                    st.dataframe(df_sh.head(5), use_container_width=True)
+
+        with col_b:
+            if st.button("2. Forçar carga do Sheets agora", key="diag_parc_restaurar", type="primary"):
+                df_sh = _sheets_carregar("parcelamentos")
+                if df_sh.empty:
+                    st.error("Sheets vazio — nada a restaurar.")
+                else:
+                    conn = get_conn()
+                    try:
+                        schema_cols = {
+                            r[1] for r in conn.execute("PRAGMA table_info(parcelamentos)").fetchall()
+                        } - {"id"}
+                        cols_val = [c for c in df_sh.columns if c in schema_cols]
+                        if not cols_val:
+                            st.error(f"Nenhuma coluna do Sheets bate com o SQLite.\nSheets: {df_sh.columns.tolist()}\nSQLite: {sorted(schema_cols)}")
+                            conn.close()
+                        else:
+                            df_ins = df_sh[cols_val].copy().fillna("")
+                            conn.execute("DELETE FROM parcelamentos")
+                            df_ins.to_sql("parcelamentos", conn, if_exists="append", index=False)
+                            conn.commit()
+                            conn.close()
+                            st.success(f"✅ {len(df_ins)} parcelamento(s) carregado(s) do Sheets!")
+                            st.rerun()
+                    except Exception as ex:
+                        conn.close()
+                        st.error(f"Erro ao carregar: {ex}")
 
 # ============================================================================
 # MENU: SENHAS E ACESSOS
