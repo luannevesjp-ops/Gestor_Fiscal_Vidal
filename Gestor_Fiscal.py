@@ -3469,40 +3469,58 @@ def pagina_alvaras():
 
     # ── Monta / carrega DataFrame de trabalho ─────────────────────────────────
     if "alvara_df" not in st.session_state:
-        df_geral = le_planilha_google(GOOGLE_SHEET_URL, SHEET_EMPRESAS)
+        df_geral  = le_planilha_google(GOOGLE_SHEET_URL, SHEET_EMPRESAS)
         df_sheets = _alvara_carregar()
 
-        if df_geral is not None and not df_geral.empty and "Situação" in df_geral.columns:
-            mask_ativa = df_geral["Situação"].astype(str).str.upper() == "ATIVA"
-            df_base = df_geral[mask_ativa][
-                [c for c in ["Código", "Razão Social", "CNPJ", "Município", "Estado"] if c in df_geral.columns]
-            ].copy()
-            df_base = df_base.rename(columns={"Razão Social": "Nome"})
-            df_base["Código"] = df_base["Código"].apply(
-                lambda v: str(v).strip().removesuffix(".0") if pd.notna(v) else ""
-            )
-            if "CNPJ" in df_base.columns:
-                df_base["CNPJ"] = df_base["CNPJ"].apply(_formata_cnpj_mascara)
-        else:
-            df_base = pd.DataFrame(columns=["Código", "Nome", "CNPJ", "Município", "Estado"])
-
-        for c in ["Usuário", "Senha",
-                  "Alvará de Localização", "Vencimento Localização",
-                  "Alvará Sanitário", "Vencimento Sanitário",
-                  "Cert. Bombeiros", "Vencimento Bombeiros"]:
-            df_base[c] = ""
-
-        # Sobrepõe dados salvos do Sheets
-        if not df_sheets.empty and "Código" in df_sheets.columns:
-            df_sheets["Código"] = df_sheets["Código"].astype(str).str.strip()
-            df_idx = df_sheets.set_index("Código")
-            for col in ["Usuário", "Senha",
+        _COLS_EXTRAS = ["Usuário", "Senha",
                         "Alvará de Localização", "Vencimento Localização",
-                        "Alvará Sanitário", "Vencimento Sanitário",
-                        "Cert. Bombeiros", "Vencimento Bombeiros"]:
-                if col in df_idx.columns:
-                    mapeado = df_base["Código"].map(df_idx[col])
-                    df_base[col] = mapeado.where(mapeado.notna() & (mapeado != ""), df_base[col])
+                        "Alvará Sanitário",       "Vencimento Sanitário",
+                        "Cert. Bombeiros",         "Vencimento Bombeiros"]
+
+        if not df_sheets.empty and "Código" in df_sheets.columns:
+            # Sheets já tem dados completos — usa diretamente
+            df_base = df_sheets.copy()
+            df_base["Código"] = df_base["Código"].astype(str).str.strip()
+            for c in _COLS_EXTRAS:
+                if c not in df_base.columns:
+                    df_base[c] = ""
+
+            # Adiciona empresas novas do GERAL que ainda não estão no Sheets
+            if df_geral is not None and not df_geral.empty and "Situação" in df_geral.columns:
+                mask_ativa = df_geral["Situação"].astype(str).str.upper() == "ATIVA"
+                df_ativas = df_geral[mask_ativa].copy()
+                df_ativas["Código"] = df_ativas["Código"].apply(
+                    lambda v: str(v).strip().removesuffix(".0") if pd.notna(v) else ""
+                )
+                codigos_existentes = set(df_base["Código"])
+                df_novos = df_ativas[~df_ativas["Código"].isin(codigos_existentes)][
+                    [c for c in ["Código", "Razão Social", "CNPJ", "Município", "Estado"]
+                     if c in df_ativas.columns]
+                ].rename(columns={"Razão Social": "Nome"}).copy()
+                if not df_novos.empty:
+                    if "CNPJ" in df_novos.columns:
+                        df_novos["CNPJ"] = df_novos["CNPJ"].apply(_formata_cnpj_mascara)
+                    for c in _COLS_EXTRAS:
+                        df_novos[c] = ""
+                    df_base = pd.concat([df_base, df_novos], ignore_index=True)
+        else:
+            # Sheets vazio — constrói do GERAL com colunas em branco
+            if df_geral is not None and not df_geral.empty and "Situação" in df_geral.columns:
+                mask_ativa = df_geral["Situação"].astype(str).str.upper() == "ATIVA"
+                df_base = df_geral[mask_ativa][
+                    [c for c in ["Código", "Razão Social", "CNPJ", "Município", "Estado"]
+                     if c in df_geral.columns]
+                ].copy()
+                df_base = df_base.rename(columns={"Razão Social": "Nome"})
+                df_base["Código"] = df_base["Código"].apply(
+                    lambda v: str(v).strip().removesuffix(".0") if pd.notna(v) else ""
+                )
+                if "CNPJ" in df_base.columns:
+                    df_base["CNPJ"] = df_base["CNPJ"].apply(_formata_cnpj_mascara)
+            else:
+                df_base = pd.DataFrame(columns=["Código", "Nome", "CNPJ", "Município", "Estado"])
+            for c in _COLS_EXTRAS:
+                df_base[c] = ""
 
         df_base = df_base.reset_index(drop=True)
         st.session_state["alvara_df"] = df_base
