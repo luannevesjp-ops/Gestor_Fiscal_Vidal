@@ -760,7 +760,7 @@ def _filtros_comp_resp(df, key):
         comp = st.text_input("Competência (MM/AAAA)", value=_comp_anterior(), key=f"{key}_comp")
     with c2:
         resps = ["Todos"] + sorted(
-            df["responsavel"].dropna().astype(str).unique().tolist()
+            [v for v in df["responsavel"].dropna().astype(str).unique().tolist() if v.strip()]
         ) if "responsavel" in df.columns else ["Todos"]
         resp = st.selectbox("Filtrar por Colaborador", resps, key=f"{key}_resp")
     return comp, resp
@@ -1095,7 +1095,7 @@ def _filtro_est(df):
 
 def _filtro_fed(df):
     mask = (
-        (~df["matriz_filial"].astype(str).str.upper().str.contains("FILIAL", na=False)) &
+        (df["matriz_filial"].astype(str).str.strip().str.upper() == "MATRIZ") &
         (~df["regime"].astype(str).str.upper().str.contains("SIMPLES", na=False))
     )
     return df[mask]
