@@ -574,7 +574,7 @@ def pagina_simples():
 def _modal_reinf_nao_transmitidas(df_show):
     st.markdown(f"**{df_show.shape[0]} empresa(s) não transmitida(s)**")
     cols = [c for c in ["Código", "Razão Social", "CNPJ", "Município",
-                        "TRANSMISSÃO REINF", "MOTIVO SITUAÇÃO REINF"]
+                        "TRANSMISSÃO REINF", "NÚMERO RECIBO", "MOTIVO SITUAÇÃO REINF"]
             if c in df_show.columns]
     df_exib = df_show[cols].copy()
     if "CNPJ" in df_exib.columns:
@@ -618,7 +618,7 @@ def pagina_reinf():
 
     # ── colunas para exibição ─────────────────────────────────────────────────
     colunas = ["Código", "Razão Social", "CNPJ", "Regime", "Município", "Estado",
-               "TRANSMISSÃO REINF", "MOTIVO SITUAÇÃO REINF", "Situação"]
+               "TRANSMISSÃO REINF", "NÚMERO RECIBO", "MOTIVO SITUAÇÃO REINF", "Situação"]
 
     df_nao_filial = df_nao_filial[[c for c in colunas if c in df_nao_filial.columns]].copy()
     df_filiais    = df_filiais[[c for c in colunas if c in df_filiais.columns]].copy()
