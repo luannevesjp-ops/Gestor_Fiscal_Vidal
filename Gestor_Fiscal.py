@@ -573,9 +573,8 @@ def pagina_simples():
 @st.dialog("REINF — Não Transmitidas")
 def _modal_reinf_nao_transmitidas(df_show):
     st.markdown(f"**{df_show.shape[0]} empresa(s) não transmitida(s)**")
-    cols = [c for c in ["Código", "Razão Social", "CNPJ", "Município",
-                        "TRANSMISSÃO REINF", "NÚMERO RECIBO", "MOTIVO SITUAÇÃO REINF"]
-            if c in df_show.columns]
+    _excluir = {"Regime", "Estado", "Situação"}
+    cols = [c for c in df_show.columns if c not in _excluir]
     df_exib = df_show[cols].copy()
     if "CNPJ" in df_exib.columns:
         df_exib["CNPJ"] = df_exib["CNPJ"].apply(_normaliza_cnpj)
@@ -607,6 +606,10 @@ def pagina_reinf():
         st.warning("Nenhuma empresa ATIVA encontrada para REINF.")
         return
 
+    # ── detecta coluna NÚMERO RECIBO (coluna CG = índice 84) ─────────────────
+    _idx_recibo = 84
+    col_recibo = df.columns[_idx_recibo] if len(df.columns) > _idx_recibo else None
+
     # ── detecta filiais pela coluna MATRIZ / FILIAL ───────────────────────────
     if "MATRIZ / FILIAL" in df_ativas.columns:
         mask_filial = df_ativas["MATRIZ / FILIAL"].astype(str).str.strip().str.upper() == "FILIAL"
@@ -618,7 +621,9 @@ def pagina_reinf():
 
     # ── colunas para exibição ─────────────────────────────────────────────────
     colunas = ["Código", "Razão Social", "CNPJ", "Regime", "Município", "Estado",
-               "TRANSMISSÃO REINF", "NÚMERO RECIBO", "MOTIVO SITUAÇÃO REINF", "Situação"]
+               "TRANSMISSÃO REINF", "MOTIVO SITUAÇÃO REINF", "Situação"]
+    if col_recibo:
+        colunas.insert(colunas.index("TRANSMISSÃO REINF") + 1, col_recibo)
 
     df_nao_filial = df_nao_filial[[c for c in colunas if c in df_nao_filial.columns]].copy()
     df_filiais    = df_filiais[[c for c in colunas if c in df_filiais.columns]].copy()
