@@ -1394,11 +1394,15 @@ def pagina_alteracao():
     with col_s:
         if st.button("☁️ Sincronizar com Sheets", type="primary", key="sync_alt_emp"):
             df_full = _load("alteracao_empresa")
-            ok = _sheets_salvar("alteracao_empresa", df_full)
+            with st.spinner("Sincronizando..."):
+                ok = _sheets_salvar("alteracao_empresa", df_full)
             if ok:
-                st.success("✅ Sincronizado!")
+                st.success(f"✅ Sincronizado! {len(df_full)} registro(s) enviado(s).")
             else:
-                st.error("❌ Falhou.")
+                st.error(
+                    "❌ Falhou. Verifique se a aba 'ALTERACAO DE EMPRESA' existe na planilha "
+                    "do Google Sheets (nome exato, sem acento)."
+                )
     with col_d:
         _download_btn(df_show, "alteracao_empresa", "alt_emp")
 
