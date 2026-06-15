@@ -29,6 +29,7 @@ _ABA = {
     "senhas_acessos":     "SENHAS E ACESSOS",
     "alteracao_empresa":  "ALTERACAO DE EMPRESA",
     "obrigacoes_prazos":  "OBRIGACOES E PRAZOS",
+    "calendario_eventos": "CALENDARIO",
 }
 
 # ============================================================================
@@ -231,6 +232,15 @@ def init_db():
         status          TEXT DEFAULT '',
         motivo_pendencia  TEXT DEFAULT '',
         UNIQUE(competencia, regime, uf, obrigacao)
+    )""")
+
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS calendario_eventos (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        competencia TEXT NOT NULL,
+        dia         INTEGER NOT NULL,
+        conteudo    TEXT DEFAULT '',
+        UNIQUE(competencia, dia)
     )""")
 
     conn.commit()
@@ -1000,52 +1010,109 @@ def pagina_empresas_ctrl():
 # ============================================================================
 
 def pagina_calendario():
+    import calendar as _cal
+
     st.markdown("<h2 style='color:#1d3f77;'>CALENDÁRIO</h2>", unsafe_allow_html=True)
 
-    comp_sel = st.text_input("Competência (MM/AAAA)", value=_comp_anterior(), key="cal_comp")
+    comp = st.text_input("Competência (MM/AAAA)", value=_comp_anterior(), key="cal_comp")
 
-    tabelas = [
-        ("Municipal",        "controle_municipal"),
-        ("Estadual",         "controle_estadual"),
-        ("Federal",          "controle_federal"),
-        ("Simples Nacional", "controle_simples"),
-    ]
+    try:
+        partes = comp.strip().split("/")
+        mes, ano = int(partes[0]), int(partes[1])
+        if not (1 <= mes <= 12):
+            raise ValueError
+    except Exception:
+        st.warning("Informe a competência no formato MM/AAAA (ex: 05/2026).")
+        return
 
-    cols = st.columns(len(tabelas))
-    for i, (nome, tbl) in enumerate(tabelas):
-        df = _load(tbl, "competencia=?", (comp_sel,))
-        total = len(df)
-        conc  = (df["status"] == "Concluído").sum() if not df.empty and "status" in df.columns else 0
-        pend  = (df["status"] == "Pendente").sum()  if not df.empty and "status" in df.columns else 0
-        pct_c = round(conc / total * 100) if total else 0
+    nomes_mes = ["", "JANEIRO", "FEVEREIRO", "MARÇO", "ABRIL", "MAIO", "JUNHO",
+                 "JULHO", "AGOSTO", "SETEMBRO", "OUTUBRO", "NOVEMBRO", "DEZEMBRO"]
+    st.markdown(
+        f"<h3 style='text-align:center; color:#1d3f77; margin:0 0 16px;'>"
+        f"{nomes_mes[mes]} / {ano}</h3>",
+        unsafe_allow_html=True
+    )
 
-        with cols[i]:
-            cor_bg = "#d5f5e3" if pct_c >= 80 else "#fadbd8" if pct_c < 50 else "#fef9e7"
-            cor_tx = "#186a3b" if pct_c >= 80 else "#922b21" if pct_c < 50 else "#7d6608"
-            st.markdown(f"""
-            <div style='background:{cor_bg}; border-radius:10px; padding:14px;
-                        text-align:center; border:1px solid {cor_tx}22;'>
-                <b style='color:#1d3f77; font-size:14px;'>{nome}</b><br>
-                <span style='font-size:28px; font-weight:700; color:{cor_tx};'>{pct_c}%</span><br>
-                <span style='font-size:12px; color:#555;'>Concluído: {conc} | Pendente: {pend} | Total: {total}</span>
-            </div>
-            """, unsafe_allow_html=True)
+    # Semanas começando no domingo (6 = Sunday no módulo calendar do Python)
+    cal = _cal.Calendar(firstweekday=6)
+    semanas = cal.monthdayscalendar(ano, mes)
 
-    st.divider()
-    st.markdown("### Pendências do Mês")
-    pendentes = []
-    for nome, tbl in tabelas:
-        df = _load(tbl, "competencia=? AND status='Pendente'", (comp_sel,))
-        if not df.empty:
-            df["_menu"] = nome
-            pendentes.append(df[["_menu","cod","razao_social","responsavel","motivo_pendencia"]])
+    # Carrega eventos já salvos para esta competência
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT dia, conteudo FROM calendario_eventos WHERE competencia=?", (comp,)
+    ).fetchall()
+    conn.close()
+    eventos = {r[0]: r[1] for r in rows}
 
-    if pendentes:
-        df_pend = pd.concat(pendentes, ignore_index=True)
-        df_pend.columns = ["Menu","Cód","Razão Social","Responsável","Motivo"]
-        st.dataframe(df_pend, use_container_width=True, hide_index=True)
-    else:
-        st.success("Nenhuma pendência registrada para esta competência!")
+    dias_semana = ["DOM", "SEG", "TER", "QUA", "QUI", "SEX", "SÁB"]
+
+    # Cabeçalho dos dias da semana
+    cols_h = st.columns(7)
+    for i, nome_dia in enumerate(dias_semana):
+        bg = "#c0392b" if i in (0, 6) else "#1d3f77"
+        with cols_h[i]:
+            st.markdown(
+                f"<div style='background:{bg}; color:white; text-align:center; "
+                f"font-weight:bold; font-size:13px; padding:8px; "
+                f"border-radius:4px; margin-bottom:4px;'>{nome_dia}</div>",
+                unsafe_allow_html=True
+            )
+
+    valores_editados = {}
+
+    for semana in semanas:
+        cols = st.columns(7)
+        for i, dia in enumerate(semana):
+            with cols[i]:
+                if dia == 0:
+                    # Célula vazia (fora do mês)
+                    st.markdown(
+                        "<div style='min-height:150px; background:#ecf0f1; "
+                        "border:1px solid #bdc3c7; border-radius:4px; "
+                        "margin-bottom:6px;'></div>",
+                        unsafe_allow_html=True
+                    )
+                else:
+                    cor_num = "#c0392b" if i in (0, 6) else "#1d3f77"
+                    st.markdown(
+                        f"<div style='color:{cor_num}; font-weight:bold; "
+                        f"font-size:15px; padding:2px 4px; margin-top:4px;'>{dia:02d}</div>",
+                        unsafe_allow_html=True
+                    )
+                    conteudo_atual = eventos.get(dia, "")
+                    if _GESTOR:
+                        val = st.text_area(
+                            label=f"dia_{dia}",
+                            value=conteudo_atual,
+                            key=f"cal_{ano}_{mes}_{dia}",
+                            height=130,
+                            label_visibility="collapsed",
+                        )
+                        valores_editados[dia] = val
+                    else:
+                        st.markdown(
+                            f"<div style='min-height:130px; background:white; "
+                            f"border:1px solid #dee2e6; border-radius:4px; padding:6px; "
+                            f"font-size:11px; white-space:pre-wrap; line-height:1.5; "
+                            f"margin-bottom:6px;'>{conteudo_atual}</div>",
+                            unsafe_allow_html=True
+                        )
+
+    if _GESTOR:
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("Salvar Calendário", type="primary", key="save_cal"):
+            conn = get_conn()
+            for dia, conteudo in valores_editados.items():
+                conn.execute("""
+                    INSERT INTO calendario_eventos (competencia, dia, conteudo)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(competencia, dia) DO UPDATE SET conteudo=excluded.conteudo
+                """, (comp, dia, conteudo))
+            conn.commit()
+            conn.close()
+            _sincronizar_sheets("calendario_eventos")
+            st.success("Calendário salvo e sincronizado!")
 
 # ============================================================================
 # MENUS: MUNICIPAL / ESTADUAL / FEDERAL / SIMPLES NACIONAL
