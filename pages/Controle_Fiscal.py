@@ -358,38 +358,30 @@ def _sheets_carregar(table_name):
 
 
 def _sheets_restaurar(table_name):
-
     df = _sheets_carregar(table_name)
-
     if df.empty:
         return False
-
     conn = get_conn()
-
     try:
-
-        # LIMPA somente os dados
+        # Descobre colunas reais do SQLite (exclui 'id' para evitar conflito com AUTOINCREMENT)
+        schema_cols = {
+            row[1] for row in
+            conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        } - {"id"}
+        # Filtra o DataFrame para incluir só colunas que existem no schema
+        cols_validas = [c for c in df.columns if c in schema_cols]
+        if not cols_validas:
+            conn.close()
+            return False
+        df_ins = df[cols_validas].copy().fillna("")
         conn.execute(f"DELETE FROM {table_name}")
-
-        # INSERE preservando estrutura original
-        df.to_sql(
-            table_name,
-            conn,
-            if_exists="append",
-            index=False
-        )
-
+        df_ins.to_sql(table_name, conn, if_exists="append", index=False)
         conn.commit()
         conn.close()
-
         return True
-
     except Exception as ex:
-
         print(f"Erro restaurar {table_name}: {ex}")
-
         conn.close()
-
         return False
 
 
