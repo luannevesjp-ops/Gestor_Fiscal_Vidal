@@ -1390,21 +1390,29 @@ def pagina_alteracao():
            enable_enterprise_modules=False, update_mode=GridUpdateMode.NO_UPDATE,
            allow_unsafe_jscode=True)
 
-    col_s, col_d = st.columns([1, 3])
-    with col_s:
-        if st.button("☁️ Sincronizar com Sheets", type="primary", key="sync_alt_emp"):
-            df_full = _load("alteracao_empresa")
-            with st.spinner("Sincronizando..."):
-                ok = _sheets_salvar("alteracao_empresa", df_full)
-            if ok:
-                st.success(f"✅ Sincronizado! {len(df_full)} registro(s) enviado(s).")
-            else:
-                st.error(
-                    "❌ Falhou. Verifique se a aba 'ALTERACAO DE EMPRESA' existe na planilha "
-                    "do Google Sheets (nome exato, sem acento)."
-                )
+    col_d = st.columns(1)[0]
     with col_d:
         _download_btn(df_show, "alteracao_empresa", "alt_emp")
+
+    with st.expander("🔍 Diagnóstico de sincronização (suporte técnico)", expanded=False):
+        if st.button("Testar envio para Sheets", key="diag_sync_alt"):
+            url = _script_url()
+            if not url:
+                st.error("SCRIPT_URL não está configurado nos secrets.")
+            else:
+                df_diag = _load("alteracao_empresa").head(3)
+                df_s = df_diag.copy().astype(str).replace("nan","").replace("None","").replace("NaT","")
+                dados = [df_s.columns.tolist()] + df_s.values.tolist()
+                try:
+                    r = requests.post(url,
+                        json={"token": _script_token(), "aba": "ALTERACAO DE EMPRESA", "dados": dados},
+                        allow_redirects=True, timeout=30)
+                    st.write(f"**HTTP status:** {r.status_code}")
+                    st.write(f"**Aba enviada:** `ALTERACAO DE EMPRESA`")
+                    st.write(f"**Linhas enviadas:** {len(dados)-1} (amostra de 3)")
+                    st.code(r.text[:1000], language="json")
+                except Exception as ex:
+                    st.error(f"Exceção ao chamar o Apps Script: {ex}")
 
 # ============================================================================
 # ROTEAMENTO
