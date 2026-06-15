@@ -869,11 +869,22 @@ if st.sidebar.button("Sair", use_container_width=True):
 
 st.sidebar.markdown("<hr style='margin:8px 0;'>", unsafe_allow_html=True)
 if st.sidebar.button("🔄 Recarregar do Sheets", use_container_width=True, key="btn_reload_all"):
+    _res_reload = {}
     with st.spinner("Recarregando dados do Sheets..."):
         for _tbl in _ABA.keys():
             if _tbl != "alteracao_empresa":
-                _sheets_restaurar(_tbl)
+                _res_reload[_tbl] = _sheets_restaurar(_tbl)
+    st.session_state["_reload_result"] = _res_reload
     st.rerun()
+
+if "_reload_result" in st.session_state:
+    _res = st.session_state.pop("_reload_result")
+    _ok   = [_ABA[t] for t, r in _res.items() if r]
+    _fail = [_ABA[t] for t, r in _res.items() if not r]
+    if _ok:
+        st.sidebar.success(f"✅ Carregado: {', '.join(_ok)}")
+    if _fail:
+        st.sidebar.warning(f"⚠️ Sem dados no Sheets: {', '.join(_fail)}")
 
 # ============================================================================
 # MENU: EMPRESAS
