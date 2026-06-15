@@ -1154,38 +1154,47 @@ def pagina_calendario():
         if st.button("Verificar Calendário no Sheets", key="diag_cal_btn"):
             df_sh = _sheets_carregar("calendario_eventos")
             conn2  = get_conn()
-            df_loc = pd.read_sql_query(
+            df_loc_comp = pd.read_sql_query(
                 "SELECT * FROM calendario_eventos WHERE competencia=?", conn2, params=[comp]
             )
+            df_loc_all = pd.read_sql_query("SELECT DISTINCT competencia FROM calendario_eventos", conn2)
             conn2.close()
 
-            st.markdown(f"**Competência analisada:** `{comp}`")
+            st.markdown(f"**Competência selecionada:** `{comp}`")
             st.markdown(f"**Sheets — aba CALENDARIO:** {len(df_sh)} linha(s) no total")
+
             if not df_sh.empty:
                 st.write("Colunas no Sheets:", df_sh.columns.tolist())
-                df_comp = df_sh[df_sh["competencia"] == comp] if "competencia" in df_sh.columns else pd.DataFrame()
-                st.markdown(f"Linhas desta competência no Sheets: **{len(df_comp)}**")
-                if not df_comp.empty:
-                    st.dataframe(df_comp, use_container_width=True)
+
+                if "competencia" in df_sh.columns:
+                    comps_sheets = sorted(df_sh["competencia"].dropna().unique().tolist())
+                    st.markdown(f"**Competências encontradas no Sheets:** {comps_sheets}")
+                    df_comp = df_sh[df_sh["competencia"] == comp]
+                    st.markdown(f"Linhas para `{comp}` no Sheets: **{len(df_comp)}**")
+                    if not df_comp.empty:
+                        st.dataframe(df_comp, use_container_width=True)
+                    else:
+                        st.warning(f"⚠️ Nenhuma linha para '{comp}' no Sheets. "
+                                   f"Os dados estão salvos em outra competência: {comps_sheets}. "
+                                   f"Altere o campo Competência acima para uma dessas opções.")
             else:
                 st.error("⚠️ Aba CALENDARIO não encontrada ou vazia no Sheets. "
                          "Preencha alguma data e clique em 'Salvar Calendário' para criar a aba.")
 
-            st.markdown(f"**SQLite local:** {len(df_loc)} linha(s) para esta competência")
-            if not df_loc.empty:
-                st.write("Tipos das colunas no SQLite:", df_loc.dtypes.to_dict())
-                st.dataframe(df_loc, use_container_width=True)
-            else:
-                st.info("Nenhum evento desta competência no banco local.")
+            comps_local = sorted(df_loc_all["competencia"].dropna().tolist()) if not df_loc_all.empty else []
+            st.markdown(f"**SQLite local — {len(df_loc_comp)} linha(s) para `{comp}`** | "
+                        f"Competências no banco: {comps_local if comps_local else 'nenhuma'}")
+            if not df_loc_comp.empty:
+                st.dataframe(df_loc_comp, use_container_width=True)
 
             if not df_sh.empty and "competencia" in df_sh.columns:
                 st.markdown("---")
-                st.markdown("**Tentando restaurar agora...**")
-                ok = _sheets_restaurar("calendario_eventos")
-                if ok:
-                    st.success("✅ Restaurado com sucesso! Recarregue a página para ver os dados.")
-                else:
-                    st.error("❌ Falha ao restaurar. Verifique os dados acima.")
+                if st.button("🔄 Restaurar CALENDÁRIO do Sheets agora", key="diag_cal_restaurar"):
+                    ok = _sheets_restaurar("calendario_eventos")
+                    if ok:
+                        st.success("✅ Restaurado! Feche este painel e troque a competência para ver os dados.")
+                    else:
+                        st.error("❌ Falha ao restaurar.")
 
 # ============================================================================
 # MENUS: MUNICIPAL / ESTADUAL / FEDERAL / SIMPLES NACIONAL
