@@ -1247,53 +1247,32 @@ def pagina_parcelamentos():
         with col_d:
             _download_btn(df_show.drop(columns=["id"], errors="ignore"), "parcelamentos", "parc")
 
-    with st.expander("🔍 Diagnóstico de sincronização — PARCELAMENTOS", expanded=False):
-        st.markdown("Use os botões abaixo para inspecionar e corrigir a sincronização com o Google Sheets.")
-
-        col_a, col_b = st.columns(2)
-
-        with col_a:
-            if st.button("1. Ver dados do Sheets", key="diag_parc_ler"):
-                df_sh = _sheets_carregar("parcelamentos")
-                if df_sh.empty:
-                    st.error("Sheets retornou vazio ou a aba 'PARCELAMENTOS' não existe / não tem dados.")
-                else:
-                    st.success(f"Sheets retornou {len(df_sh)} linha(s).")
-                    st.write("**Colunas no Sheets:**", df_sh.columns.tolist())
-                    conn = get_conn()
-                    schema_cols = [r[1] for r in conn.execute("PRAGMA table_info(parcelamentos)").fetchall()]
+    if st.button("📥 Carregar Parcelamentos do Sheets", key="parc_carregar_sheets"):
+        df_sh = _sheets_carregar("parcelamentos")
+        if df_sh.empty:
+            st.error("Sheets vazio ou aba 'PARCELAMENTOS' não encontrada.")
+        else:
+            conn = get_conn()
+            try:
+                schema_cols = {
+                    r[1] for r in conn.execute("PRAGMA table_info(parcelamentos)").fetchall()
+                } - {"id"}
+                cols_val = [c for c in df_sh.columns if c in schema_cols]
+                if not cols_val:
+                    st.error(f"Colunas do Sheets não batem com o sistema. Contate o suporte.")
                     conn.close()
-                    st.write("**Colunas no SQLite:**", schema_cols)
-                    comuns = [c for c in df_sh.columns if c in schema_cols and c != "id"]
-                    st.write("**Colunas em comum (serão carregadas):**", comuns if comuns else "⚠️ NENHUMA — os nomes não batem!")
-                    st.dataframe(df_sh.head(5), use_container_width=True)
-
-        with col_b:
-            if st.button("2. Forçar carga do Sheets agora", key="diag_parc_restaurar", type="primary"):
-                df_sh = _sheets_carregar("parcelamentos")
-                if df_sh.empty:
-                    st.error("Sheets vazio — nada a restaurar.")
                 else:
-                    conn = get_conn()
-                    try:
-                        schema_cols = {
-                            r[1] for r in conn.execute("PRAGMA table_info(parcelamentos)").fetchall()
-                        } - {"id"}
-                        cols_val = [c for c in df_sh.columns if c in schema_cols]
-                        if not cols_val:
-                            st.error(f"Nenhuma coluna do Sheets bate com o SQLite.\nSheets: {df_sh.columns.tolist()}\nSQLite: {sorted(schema_cols)}")
-                            conn.close()
-                        else:
-                            df_ins = df_sh[cols_val].copy().fillna("")
-                            conn.execute("DELETE FROM parcelamentos")
-                            df_ins.to_sql("parcelamentos", conn, if_exists="append", index=False)
-                            conn.commit()
-                            conn.close()
-                            st.success(f"✅ {len(df_ins)} parcelamento(s) carregado(s) do Sheets!")
-                            st.rerun()
-                    except Exception as ex:
-                        conn.close()
-                        st.error(f"Erro ao carregar: {ex}")
+                    df_ins = df_sh[cols_val].copy().fillna("")
+                    conn.execute("DELETE FROM parcelamentos")
+                    df_ins.to_sql("parcelamentos", conn, if_exists="append", index=False)
+                    conn.commit()
+                    conn.close()
+                    _sincronizar_sheets("parcelamentos")
+                    st.success(f"✅ {len(df_ins)} parcelamento(s) carregado(s) do Sheets!")
+                    st.rerun()
+            except Exception as ex:
+                conn.close()
+                st.error(f"Erro ao carregar: {ex}")
 
 # ============================================================================
 # MENU: SENHAS E ACESSOS
@@ -1357,65 +1336,35 @@ def pagina_senhas():
         with col_d:
             _download_btn(df_show.drop(columns=["id"], errors="ignore"), "senhas_acessos", "sen")
 
-    with st.expander("🔍 Diagnóstico de sincronização — SENHAS E ACESSOS", expanded=False):
-        st.markdown("Use os botões abaixo para inspecionar e corrigir a sincronização com o Google Sheets.")
-
-        col_a, col_b = st.columns(2)
-
-        with col_a:
-            if st.button("1. Ver dados do Sheets", key="diag_sen_ler"):
-                df_sh = _sheets_carregar("senhas_acessos")
-                if df_sh.empty:
-                    st.error("Sheets retornou vazio ou a aba 'SENHAS E ACESSOS' não existe / não tem dados.")
-                else:
-                    st.success(f"Sheets retornou {len(df_sh)} linha(s).")
-                    st.write("**Colunas originais no Sheets:**", df_sh.columns.tolist())
-                    col_map = _SHEETS_COL_RENAME.get("senhas_acessos", {})
-                    if col_map:
-                        df_sh_map = df_sh.rename(columns=col_map)
-                        st.write("**Mapeamento aplicado:**", col_map)
-                    else:
-                        df_sh_map = df_sh
-                    conn = get_conn()
-                    schema_cols = [r[1] for r in conn.execute("PRAGMA table_info(senhas_acessos)").fetchall()]
+    if st.button("📥 Carregar Senhas e Acessos do Sheets", key="sen_carregar_sheets"):
+        df_sh = _sheets_carregar("senhas_acessos")
+        if df_sh.empty:
+            st.error("Sheets vazio ou aba 'SENHAS E ACESSOS' não encontrada.")
+        else:
+            col_map = _SHEETS_COL_RENAME.get("senhas_acessos", {})
+            if col_map:
+                df_sh = df_sh.rename(columns=col_map)
+            conn = get_conn()
+            try:
+                schema_cols = {
+                    r[1] for r in conn.execute("PRAGMA table_info(senhas_acessos)").fetchall()
+                } - {"id"}
+                cols_val = [c for c in df_sh.columns if c in schema_cols]
+                if not cols_val:
+                    st.error("Colunas do Sheets não batem com o sistema. Contate o suporte.")
                     conn.close()
-                    st.write("**Colunas no SQLite:**", schema_cols)
-                    comuns = [c for c in df_sh_map.columns if c in schema_cols and c != "id"]
-                    st.write("**Colunas que serão carregadas:**", comuns if comuns else "⚠️ NENHUMA — mapeamento insuficiente!")
-                    st.dataframe(df_sh.head(5), use_container_width=True)
-
-        with col_b:
-            if st.button("2. Forçar carga do Sheets agora", key="diag_sen_restaurar", type="primary"):
-                df_sh = _sheets_carregar("senhas_acessos")
-                if df_sh.empty:
-                    st.error("Sheets vazio — nada a restaurar.")
                 else:
-                    # Aplica mapeamento de colunas (Sheets tem nomes em português)
-                    col_map = _SHEETS_COL_RENAME.get("senhas_acessos", {})
-                    if col_map:
-                        df_sh = df_sh.rename(columns=col_map)
-                    conn = get_conn()
-                    try:
-                        schema_cols = {
-                            r[1] for r in conn.execute("PRAGMA table_info(senhas_acessos)").fetchall()
-                        } - {"id"}
-                        cols_val = [c for c in df_sh.columns if c in schema_cols]
-                        if not cols_val:
-                            st.error(f"Nenhuma coluna bate após renomear.\nDisponíveis: {df_sh.columns.tolist()}")
-                            conn.close()
-                        else:
-                            df_ins = df_sh[cols_val].copy().fillna("")
-                            conn.execute("DELETE FROM senhas_acessos")
-                            df_ins.to_sql("senhas_acessos", conn, if_exists="append", index=False)
-                            conn.commit()
-                            conn.close()
-                            # Sincroniza de volta ao Sheets com os nomes de coluna padronizados
-                            _sincronizar_sheets("senhas_acessos")
-                            st.success(f"✅ {len(df_ins)} senha(s)/acesso(s) carregado(s) e Sheets atualizado com colunas padronizadas!")
-                            st.rerun()
-                    except Exception as ex:
-                        conn.close()
-                        st.error(f"Erro ao carregar: {ex}")
+                    df_ins = df_sh[cols_val].copy().fillna("")
+                    conn.execute("DELETE FROM senhas_acessos")
+                    df_ins.to_sql("senhas_acessos", conn, if_exists="append", index=False)
+                    conn.commit()
+                    conn.close()
+                    _sincronizar_sheets("senhas_acessos")
+                    st.success(f"✅ {len(df_ins)} senha(s)/acesso(s) carregado(s) do Sheets!")
+                    st.rerun()
+            except Exception as ex:
+                conn.close()
+                st.error(f"Erro ao carregar: {ex}")
 
 # ============================================================================
 # MENU: OBRIGAÇÕES E PRAZOS
