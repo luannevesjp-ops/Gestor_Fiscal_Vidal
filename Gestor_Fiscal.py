@@ -3690,6 +3690,13 @@ def pagina_alvaras():
                  "Cert. Bombeiros", "Vencimento Bombeiros"]
     df_edit = df_work[[c for c in cols_exib if c in df_work.columns]].copy()
 
+    # Garante strings puras — SelectboxColumn não aceita NaN/float
+    for col in df_edit.columns:
+        df_edit[col] = df_edit[col].fillna("").astype(str).replace({"nan": "", "None": ""})
+    for col in ["Alvará de Localização", "Alvará Sanitário", "Cert. Bombeiros"]:
+        if col in df_edit.columns:
+            df_edit[col] = df_edit[col].apply(lambda v: v if v in ("SIM", "NÃO") else "")
+
     df_editado = st.data_editor(
         df_edit,
         key="editor_alvaras",
