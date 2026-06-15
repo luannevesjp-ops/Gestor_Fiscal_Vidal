@@ -317,8 +317,7 @@ def _sheets_salvar(table_name, df):
     if not url:
         return False
     aba = _ABA.get(table_name, table_name)
-    df_s = df.copy().astype(str)
-    df_s = df_s.replace("nan", "").replace("None", "").replace("NaT", "")
+    df_s = df.copy().fillna("").astype(str)
     dados = [df_s.columns.tolist()] + df_s.values.tolist()
     try:
         r = requests.post(url,
