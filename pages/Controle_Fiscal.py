@@ -653,10 +653,6 @@ def _importar_empresas_sheets():
 
 
 def _auto_populate(table, competencia, filtro_fn):
-    cache_key = f"populated_{table}_{competencia}"
-    if cache_key in st.session_state:
-        return
-    st.session_state[cache_key] = True
     conn = get_conn()
     existentes = {
         r[0] for r in conn.execute(
