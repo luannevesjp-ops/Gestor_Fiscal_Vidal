@@ -3384,22 +3384,18 @@ def _alvara_script_url():
 def _alvara_script_token():
     return str(st.secrets.get("SCRIPT_TOKEN", ""))
 
-_ABA_ALVARA = "ALVARA"
+_ABA_ALVARA        = "ALVARA"
+_ALVARA_SHEET_URL  = "https://docs.google.com/spreadsheets/d/1mDsIQ8sWefY0Xa0Q2tYjW86p0ngdy-B2OyRd6nTc57w/export?format=xlsx"
 
 
+@st.cache_data(ttl=60)
 def _alvara_carregar():
-    url = _alvara_script_url()
-    if not url:
-        return pd.DataFrame()
     try:
-        r = requests.get(url, params={"token": _alvara_script_token(), "aba": _ABA_ALVARA},
-                         allow_redirects=True, timeout=30)
-        res = r.json()
-        if res.get("ok") and res.get("dados"):
-            linhas = res["dados"]
-            if len(linhas) > 1:
-                return pd.DataFrame(linhas[1:], columns=[str(c) for c in linhas[0]])
-        return pd.DataFrame()
+        resp = requests.get(_ALVARA_SHEET_URL, timeout=30)
+        resp.raise_for_status()
+        df = pd.read_excel(BytesIO(resp.content), sheet_name=_ABA_ALVARA, engine="openpyxl")
+        df.columns = df.columns.str.strip()
+        return df
     except Exception:
         return pd.DataFrame()
 
@@ -3460,11 +3456,10 @@ def pagina_alvaras():
     col_rf, col_esp = st.columns([1, 4])
     with col_rf:
         if st.button("🔄 Atualizar do Sheets", key="btn_alvara_refresh", use_container_width=True):
-            for k in ["alvara_df"]:
+            _alvara_carregar.clear()
+            for k in ["alvara_df", "editor_alvaras"]:
                 if k in st.session_state:
                     del st.session_state[k]
-            if "editor_alvaras" in st.session_state:
-                del st.session_state["editor_alvaras"]
             st.rerun()
 
     # ── Monta / carrega DataFrame de trabalho ─────────────────────────────────
