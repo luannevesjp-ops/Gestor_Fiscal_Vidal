@@ -1319,25 +1319,72 @@ def pagina_senhas():
     df = _load("senhas_acessos")
     if df.empty:
         st.info("Nenhuma senha cadastrada.")
-        return
+    else:
+        RENAME = {
+            "cod":"CÓD","razao_cnpj":"RAZÃO SOCIAL","cnpj":"CNPJ",
+            "codigo_acesso":"CÓDIGO ACESSO","municipio":"MUNICÍPIO",
+            "login":"LOGIN","senha":"SENHA","observacoes":"OBSERVAÇÕES",
+        }
+        df_show = df.rename(columns=RENAME).fillna("")
+        resp = _build_grid(df_show, edit_cols=list(RENAME.values()), key="grid_sen")
 
-    RENAME = {
-        "cod":"CÓD","razao_cnpj":"RAZÃO SOCIAL","cnpj":"CNPJ",
-        "codigo_acesso":"CÓDIGO ACESSO","municipio":"MUNICÍPIO",
-        "login":"LOGIN","senha":"SENHA","observacoes":"OBSERVAÇÕES",
-    }
-    df_show = df.rename(columns=RENAME).fillna("")
-    resp = _build_grid(df_show, edit_cols=list(RENAME.values()), key="grid_sen")
+        col_s, col_d = st.columns([1, 3])
+        with col_s:
+            if st.button("💾 Salvar", type="primary", key="save_sen"):
+                df_ed = pd.DataFrame(resp["data"]).rename(columns={v: k for k, v in RENAME.items()})
+                _save_grid(df_ed, "senhas_acessos")
+                st.success("✅ Salvo e sincronizado!")
+                st.rerun()
+        with col_d:
+            _download_btn(df_show.drop(columns=["id"], errors="ignore"), "senhas_acessos", "sen")
 
-    col_s, col_d = st.columns([1, 3])
-    with col_s:
-        if st.button("💾 Salvar", type="primary", key="save_sen"):
-            df_ed = pd.DataFrame(resp["data"]).rename(columns={v: k for k, v in RENAME.items()})
-            _save_grid(df_ed, "senhas_acessos")
-            st.success("✅ Salvo e sincronizado!")
-            st.rerun()
-    with col_d:
-        _download_btn(df_show.drop(columns=["id"], errors="ignore"), "senhas_acessos", "sen")
+    with st.expander("🔍 Diagnóstico de sincronização — SENHAS E ACESSOS", expanded=False):
+        st.markdown("Use os botões abaixo para inspecionar e corrigir a sincronização com o Google Sheets.")
+
+        col_a, col_b = st.columns(2)
+
+        with col_a:
+            if st.button("1. Ver dados do Sheets", key="diag_sen_ler"):
+                df_sh = _sheets_carregar("senhas_acessos")
+                if df_sh.empty:
+                    st.error("Sheets retornou vazio ou a aba 'SENHAS E ACESSOS' não existe / não tem dados.")
+                else:
+                    st.success(f"Sheets retornou {len(df_sh)} linha(s).")
+                    st.write("**Colunas no Sheets:**", df_sh.columns.tolist())
+                    conn = get_conn()
+                    schema_cols = [r[1] for r in conn.execute("PRAGMA table_info(senhas_acessos)").fetchall()]
+                    conn.close()
+                    st.write("**Colunas no SQLite:**", schema_cols)
+                    comuns = [c for c in df_sh.columns if c in schema_cols and c != "id"]
+                    st.write("**Colunas em comum (serão carregadas):**", comuns if comuns else "⚠️ NENHUMA — os nomes não batem!")
+                    st.dataframe(df_sh.head(5), use_container_width=True)
+
+        with col_b:
+            if st.button("2. Forçar carga do Sheets agora", key="diag_sen_restaurar", type="primary"):
+                df_sh = _sheets_carregar("senhas_acessos")
+                if df_sh.empty:
+                    st.error("Sheets vazio — nada a restaurar.")
+                else:
+                    conn = get_conn()
+                    try:
+                        schema_cols = {
+                            r[1] for r in conn.execute("PRAGMA table_info(senhas_acessos)").fetchall()
+                        } - {"id"}
+                        cols_val = [c for c in df_sh.columns if c in schema_cols]
+                        if not cols_val:
+                            st.error(f"Nenhuma coluna do Sheets bate com o SQLite.\nSheets: {df_sh.columns.tolist()}\nSQLite: {sorted(schema_cols)}")
+                            conn.close()
+                        else:
+                            df_ins = df_sh[cols_val].copy().fillna("")
+                            conn.execute("DELETE FROM senhas_acessos")
+                            df_ins.to_sql("senhas_acessos", conn, if_exists="append", index=False)
+                            conn.commit()
+                            conn.close()
+                            st.success(f"✅ {len(df_ins)} senha(s)/acesso(s) carregado(s) do Sheets!")
+                            st.rerun()
+                    except Exception as ex:
+                        conn.close()
+                        st.error(f"Erro ao carregar: {ex}")
 
 # ============================================================================
 # MENU: OBRIGAÇÕES E PRAZOS
