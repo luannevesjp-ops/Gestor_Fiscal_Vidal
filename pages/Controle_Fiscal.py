@@ -515,19 +515,33 @@ def _importar_empresas_sheets():
     except Exception as ex:
         return -1, f"Erro ao ler a planilha: {ex}"
 
-    if "Situação" not in df.columns:
-        return -1, (
-            f"Coluna 'Situação' não encontrada na aba '{_SHEET_GERAL}'. "
-            f"Colunas encontradas: {', '.join(df.columns.tolist())}"
-        )
+    # Detecta formato: novo (colunas SQLite: cod, ativo) ou legado (Código, Situação)
+    novo_formato = "cod" in df.columns and "razao_social" in df.columns
 
-    df_ativas = df[df["Situação"].astype(str).str.upper() == "ATIVA"].copy()
-    if df_ativas.empty:
-        status_vals = df["Situação"].dropna().astype(str).str.upper().unique().tolist()
-        return -1, (
-            f"Nenhuma empresa com Situação = 'ATIVA'. "
-            f"Valores encontrados na coluna Situação: {status_vals}"
-        )
+    if novo_formato:
+        # Filtra por coluna 'ativo'=1 (formato SQLite sincronizado)
+        if "ativo" not in df.columns:
+            return -1, (
+                f"Coluna 'ativo' não encontrada. "
+                f"Colunas: {', '.join(df.columns.tolist())}"
+            )
+        df_ativas = df[df["ativo"].astype(str).str.split(".").str[0] == "1"].copy()
+        if df_ativas.empty:
+            return -1, f"Nenhuma empresa com ativo=1 encontrada. Total na planilha: {len(df)}"
+    else:
+        # Formato legado: Código, Razão Social, Situação
+        if "Situação" not in df.columns:
+            return -1, (
+                f"Formato não reconhecido na aba '{_SHEET_GERAL}'. "
+                f"Colunas encontradas: {', '.join(df.columns.tolist())}"
+            )
+        df_ativas = df[df["Situação"].astype(str).str.upper() == "ATIVA"].copy()
+        if df_ativas.empty:
+            status_vals = df["Situação"].dropna().astype(str).str.upper().unique().tolist()
+            return -1, (
+                f"Nenhuma empresa com Situação='ATIVA'. "
+                f"Valores encontrados: {status_vals}"
+            )
 
     conn = get_conn()
     inseridos = ignorados = 0
@@ -540,7 +554,33 @@ def _importar_empresas_sheets():
                 s = str(val).strip()
                 return s[:-2] if s.endswith(".0") else s
 
-            cod = _v("Código")
+            if novo_formato:
+                cod           = _v("cod")
+                razao_social  = _v("razao_social")
+                cnpj          = _normaliza_cnpj(_v("cnpj"))
+                regime        = _v("regime")
+                matriz_filial = _v("matriz_filial")
+                ie            = _v("ie")
+                im            = _v("im")
+                uf            = _v("uf")
+                municipio     = _v("municipio")
+                grupo         = _v("grupo")
+                resp_fisc     = _v("responsavel_fiscal")
+                obs           = _v("observacoes")
+            else:
+                cod           = _v("Código")
+                razao_social  = _v("Razão Social")
+                cnpj          = _normaliza_cnpj(_v("CNPJ"))
+                regime        = _v("Regime")
+                matriz_filial = _v("Matriz / Filial")
+                ie            = _v("Insc. Estadual")
+                im            = _v("Insc. Municipal")
+                uf            = _v("Estado")
+                municipio     = _v("Município")
+                grupo         = _v("Grupo")
+                resp_fisc     = ""
+                obs           = ""
+
             if not cod:
                 continue
             exists = conn.execute(
@@ -549,15 +589,14 @@ def _importar_empresas_sheets():
             if exists is None:
                 conn.execute("""
                 INSERT INTO empresas_controle
-                (cod,razao_social,cnpj,regime,matriz_filial,ie,im,uf,municipio,grupo,criado_por)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?)
-                """, (cod, _v("Razão Social"), _normaliza_cnpj(_v("CNPJ")),
-                      _v("Regime"), _v("Matriz / Filial"), _v("Insc. Estadual"),
-                      _v("Insc. Municipal"), _v("Estado"), _v("Município"),
-                      _v("Grupo"), "IMPORTAÇÃO"))
+                (cod,razao_social,cnpj,regime,matriz_filial,ie,im,uf,municipio,grupo,
+                 responsavel_fiscal,observacoes,criado_por)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """, (cod, razao_social, cnpj, regime, matriz_filial, ie, im, uf,
+                      municipio, grupo, resp_fisc, obs, "IMPORTAÇÃO"))
                 conn.execute(
                     "INSERT INTO alteracao_empresa(tipo,cod,razao_social,cnpj,usuario) VALUES(?,?,?,?,?)",
-                    ("INCLUSAO", cod, _v("Razão Social"), _normaliza_cnpj(_v("CNPJ")), "IMPORTAÇÃO")
+                    ("INCLUSAO", cod, razao_social, cnpj, "IMPORTAÇÃO")
                 )
                 inseridos += 1
             else:
