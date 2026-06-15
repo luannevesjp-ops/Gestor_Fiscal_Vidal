@@ -513,14 +513,21 @@ def _importar_empresas_sheets():
         df = pd.read_excel(BytesIO(resp.content), sheet_name=_SHEET_GERAL, engine="openpyxl")
         df.columns = df.columns.str.strip()
     except Exception as ex:
-        return 0, f"Erro ao ler a planilha: {ex}"
+        return -1, f"Erro ao ler a planilha: {ex}"
 
     if "Situação" not in df.columns:
-        return 0, "Coluna 'Situação' não encontrada."
+        return -1, (
+            f"Coluna 'Situação' não encontrada na aba '{_SHEET_GERAL}'. "
+            f"Colunas encontradas: {', '.join(df.columns.tolist())}"
+        )
 
     df_ativas = df[df["Situação"].astype(str).str.upper() == "ATIVA"].copy()
     if df_ativas.empty:
-        return 0, "Nenhuma empresa ATIVA encontrada."
+        status_vals = df["Situação"].dropna().astype(str).str.upper().unique().tolist()
+        return -1, (
+            f"Nenhuma empresa com Situação = 'ATIVA'. "
+            f"Valores encontrados na coluna Situação: {status_vals}"
+        )
 
     conn = get_conn()
     inseridos = ignorados = 0
@@ -558,7 +565,7 @@ def _importar_empresas_sheets():
         conn.commit()
     except Exception as ex:
         conn.close()
-        return 0, f"Erro ao salvar: {ex}"
+        return -1, f"Erro ao salvar: {ex}"
     conn.close()
     _sincronizar_sheets("empresas_controle")
     _sincronizar_sheets("alteracao_empresa")
@@ -773,9 +780,11 @@ def pagina_empresas_ctrl():
                          use_container_width=True):
                 with st.spinner("Importando..."):
                     qtd, msg = _importar_empresas_sheets()
-                if qtd >= 0:
+                if qtd > 0:
                     st.success(msg)
                     st.rerun()
+                elif qtd == 0:
+                    st.info(msg)
                 else:
                     st.error(msg)
         st.divider()
