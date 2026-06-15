@@ -606,7 +606,6 @@ def _importar_empresas_sheets():
         conn.close()
         return -1, f"Erro ao salvar: {ex}"
     conn.close()
-    _sincronizar_sheets("empresas_controle")
     _sincronizar_sheets("alteracao_empresa")
     return inseridos, f"{inseridos} importada(s). {ignorados} já existia(m) e foram ignorada(s)."
 
@@ -868,7 +867,7 @@ def pagina_empresas_ctrl():
                         )
                         conn.commit()
                         st.success(f"Empresa '{n_razao}' adicionada!")
-                        _sincronizar_sheets("empresas_controle")
+                        _sheets_salvar("empresas_controle", _load("empresas_controle", "ativo=1"))
                         _sincronizar_sheets("alteracao_empresa")
                         st.rerun()
                     except Exception as ex:
