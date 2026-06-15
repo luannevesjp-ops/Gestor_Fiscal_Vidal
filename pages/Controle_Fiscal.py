@@ -396,6 +396,46 @@ def _sincronizar_sheets(table_name):
         pass
 
 
+def _sincronizar_alteracao_empresa():
+    """Sync alteracao_empresa preservando TODOS os registros do Sheets (nunca apaga)."""
+    try:
+        df_sqlite = _load("alteracao_empresa")
+        df_sheets = _sheets_carregar("alteracao_empresa")
+
+        if df_sheets.empty:
+            if not df_sqlite.empty:
+                _sheets_salvar("alteracao_empresa", df_sqlite)
+            return
+
+        if df_sqlite.empty:
+            return
+
+        # Alinha colunas com o SQLite como referência
+        sqlite_cols = df_sqlite.columns.tolist()
+        for col in sqlite_cols:
+            if col not in df_sheets.columns:
+                df_sheets[col] = ""
+        df_sheets = df_sheets[[c for c in sqlite_cols if c in df_sheets.columns]]
+
+        # IDs presentes em cada fonte
+        ids_sheets = set(pd.to_numeric(df_sheets["id"], errors="coerce").dropna().astype(int))
+        ids_sqlite = set(pd.to_numeric(df_sqlite["id"], errors="coerce").dropna().astype(int))
+
+        # Registros que só existem no Sheets (histórico não restaurado no SQLite)
+        apenas_sheets = df_sheets[
+            pd.to_numeric(df_sheets["id"], errors="coerce").isin(ids_sheets - ids_sqlite)
+        ]
+
+        df_combined = pd.concat([df_sqlite, apenas_sheets], ignore_index=True)
+        df_combined["_ord"] = pd.to_numeric(df_combined["id"], errors="coerce")
+        df_combined = df_combined.sort_values("_ord", ascending=True, na_position="last")
+        df_combined = df_combined.drop(columns=["_ord"])
+
+        _sheets_salvar("alteracao_empresa", df_combined)
+    except Exception:
+        pass
+
+
 # Restaura do Sheets apenas UMA vez por sessão
 if "db_restaurado" not in st.session_state:
     for _tbl in _ABA.keys():
@@ -502,7 +542,7 @@ def _log_alteracoes_empresa(df_antes, df_depois):
     conn.close()
 
     # Sincroniza automaticamente
-    _sincronizar_sheets("alteracao_empresa")
+    _sincronizar_alteracao_empresa()
 
 
 def _importar_empresas_sheets():
@@ -608,7 +648,7 @@ def _importar_empresas_sheets():
         conn.close()
         return -1, f"Erro ao salvar: {ex}"
     conn.close()
-    _sincronizar_sheets("alteracao_empresa")
+    _sincronizar_alteracao_empresa()
     return inseridos, f"{inseridos} importada(s). {ignorados} já existia(m) e foram ignorada(s)."
 
 
@@ -874,7 +914,7 @@ def pagina_empresas_ctrl():
                         conn.commit()
                         st.success(f"Empresa '{n_razao}' adicionada!")
                         _sheets_salvar("empresas_controle", _load("empresas_controle", "ativo=1"))
-                        _sincronizar_sheets("alteracao_empresa")
+                        _sincronizar_alteracao_empresa()
                         st.rerun()
                     except Exception as ex:
                         st.error(f"Erro: {ex}")
@@ -930,7 +970,7 @@ def pagina_empresas_ctrl():
             _save_grid(df_rev, "empresas_controle")
             _log_alteracoes_empresa(df_antes, df_rev)
             time.sleep(2)
-            _sincronizar_sheets("alteracao_empresa")
+            _sincronizar_alteracao_empresa()
             st.success("✅ Salvo e sincronizado!")
             st.rerun()
     with col_d:
@@ -955,7 +995,7 @@ def pagina_empresas_ctrl():
                 conn.commit()
                 conn.close()
                 _sheets_salvar("empresas_controle", _load("empresas_controle", "ativo=1"))
-                _sincronizar_sheets("alteracao_empresa")
+                _sincronizar_alteracao_empresa()
                 st.success(f"Empresa '{r['razao_social']}' excluída e sincronizada!")
                 st.rerun()
 
