@@ -877,7 +877,7 @@ _MENUS = [
 pagina = st.sidebar.radio("Menu", _MENUS, label_visibility="collapsed")
 st.sidebar.markdown("<hr style='margin:8px 0;'>", unsafe_allow_html=True)
 
-if st.sidebar.button("← Voltar ao Sistema", use_container_width=True):
+if _GESTOR and st.sidebar.button("← Voltar ao Sistema", use_container_width=True):
     st.switch_page("Gestor_Fiscal.py")
 
 if st.sidebar.button("Sair", use_container_width=True):
@@ -1349,37 +1349,37 @@ def pagina_senhas():
     st.markdown("<h2 style='color:#1d3f77;'>SENHAS E ACESSOS</h2>", unsafe_allow_html=True)
 
     if not _GESTOR:
-        st.warning("Acesso restrito. Somente o nível GESTOR pode visualizar senhas.")
-        return
+        st.info("Visualização somente leitura. Para alterações, acesse com o nível GESTOR.")
 
-    with st.expander("➕ Novo Registro", expanded=False):
-        df_emp = _load("empresas_controle", "ativo=1")
-        opcoes = [""] + (df_emp["razao_social"].tolist() if not df_emp.empty else [])
-        sel = st.selectbox("Empresa", opcoes, key="sen_emp")
-        emp_r = df_emp[df_emp["razao_social"] == sel].iloc[0] if sel else None
+    if _GESTOR:
+        with st.expander("➕ Novo Registro", expanded=False):
+            df_emp = _load("empresas_controle", "ativo=1")
+            opcoes = [""] + (df_emp["razao_social"].tolist() if not df_emp.empty else [])
+            sel = st.selectbox("Empresa", opcoes, key="sen_emp")
+            emp_r = df_emp[df_emp["razao_social"] == sel].iloc[0] if sel else None
 
-        c1, c2 = st.columns(2)
-        with c1:
-            s_cod_ac = st.text_input("Código de Acesso", key="sen_cod")
-            s_mun    = st.text_input("Município", key="sen_mun")
-            s_login  = st.text_input("Login", key="sen_login")
-        with c2:
-            s_senha  = st.text_input("Senha", type="password", key="sen_senha")
-            s_obs    = st.text_input("Observações", key="sen_obs")
+            c1, c2 = st.columns(2)
+            with c1:
+                s_cod_ac = st.text_input("Código de Acesso", key="sen_cod")
+                s_mun    = st.text_input("Município", key="sen_mun")
+                s_login  = st.text_input("Login", key="sen_login")
+            with c2:
+                s_senha  = st.text_input("Senha", type="password", key="sen_senha")
+                s_obs    = st.text_input("Observações", key="sen_obs")
 
-        if st.button("Adicionar", type="primary", key="btn_add_sen"):
-            if emp_r is not None:
-                conn = get_conn()
-                conn.execute("""
-                INSERT INTO senhas_acessos(cod,razao_cnpj,cnpj,codigo_acesso,municipio,login,senha,observacoes)
-                VALUES(?,?,?,?,?,?,?,?)
-                """, (emp_r.get("cod",""), emp_r.get("razao_social",""), emp_r.get("cnpj",""),
-                      s_cod_ac, s_mun, s_login, s_senha, s_obs))
-                conn.commit()
-                conn.close()
-                _sincronizar_sheets("senhas_acessos")
-                st.success("Registro adicionado!")
-                st.rerun()
+            if st.button("Adicionar", type="primary", key="btn_add_sen"):
+                if emp_r is not None:
+                    conn = get_conn()
+                    conn.execute("""
+                    INSERT INTO senhas_acessos(cod,razao_cnpj,cnpj,codigo_acesso,municipio,login,senha,observacoes)
+                    VALUES(?,?,?,?,?,?,?,?)
+                    """, (emp_r.get("cod",""), emp_r.get("razao_social",""), emp_r.get("cnpj",""),
+                          s_cod_ac, s_mun, s_login, s_senha, s_obs))
+                    conn.commit()
+                    conn.close()
+                    _sincronizar_sheets("senhas_acessos")
+                    st.success("Registro adicionado!")
+                    st.rerun()
 
     df = _load("senhas_acessos")
     if df.empty:
@@ -1391,11 +1391,12 @@ def pagina_senhas():
             "login":"LOGIN","senha":"SENHA","observacoes":"OBSERVAÇÕES",
         }
         df_show = df.rename(columns=RENAME).fillna("")
-        resp = _build_grid(df_show, edit_cols=list(RENAME.values()), key="grid_sen")
+        edit_senhas = list(RENAME.values()) if _GESTOR else []
+        resp = _build_grid(df_show, edit_cols=edit_senhas, key="grid_sen")
 
         col_s, col_d = st.columns([1, 3])
         with col_s:
-            if st.button("💾 Salvar", type="primary", key="save_sen"):
+            if _GESTOR and st.button("💾 Salvar", type="primary", key="save_sen"):
                 df_ed = pd.DataFrame(resp["data"]).rename(columns={v: k for k, v in RENAME.items()})
                 _save_grid(df_ed, "senhas_acessos")
                 st.success("✅ Salvo e sincronizado!")
@@ -1494,6 +1495,10 @@ def pagina_obrigacoes():
 def pagina_painel():
     import plotly.graph_objects as go
     st.markdown("<h2 style='color:#1d3f77;'>PAINEL DE CONTROLE</h2>", unsafe_allow_html=True)
+
+    if not _GESTOR:
+        st.warning("Acesso restrito. Somente o nível GESTOR pode acessar o Painel de Controle.")
+        return
 
     comp = st.text_input("Competência (MM/AAAA)", value=_comp_anterior(), key="pain_comp")
 
