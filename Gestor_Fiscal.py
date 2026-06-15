@@ -323,7 +323,7 @@ if st.session_state["menu_area"] == "FISCAL":
                            "SEFAZ COMPARAÇÃO", "COMPARAÇÃO DE IMPOSTOS"]
 
 elif st.session_state["menu_area"] == "PARALEGAL":
-    paginas_disponiveis = ["DASHBOARD", "EMPRESAS", "CND MUNICIPAL", "SEM ACESSO"]
+    paginas_disponiveis = ["DASHBOARD", "EMPRESAS", "CND MUNICIPAL", "SEM ACESSO", "ALVARÁS"]
 
 elif st.session_state["menu_area"] == "CONTÁBIL":
     paginas_disponiveis = ["EMPRESAS"]
@@ -3301,6 +3301,354 @@ def pagina_comparacao_impostos():
 
 
 # ============================================================================
+# ALVARÁS — DEPARTAMENTO PARALEGAL
+# ============================================================================
+
+def _alvara_script_url():
+    return str(st.secrets.get("SCRIPT_URL", ""))
+
+def _alvara_script_token():
+    return str(st.secrets.get("SCRIPT_TOKEN", ""))
+
+_ABA_ALVARA = "ALVARA"
+
+
+def _alvara_carregar():
+    url = _alvara_script_url()
+    if not url:
+        return pd.DataFrame()
+    try:
+        r = requests.get(url, params={"token": _alvara_script_token(), "aba": _ABA_ALVARA},
+                         allow_redirects=True, timeout=30)
+        res = r.json()
+        if res.get("ok") and res.get("dados"):
+            linhas = res["dados"]
+            if len(linhas) > 1:
+                return pd.DataFrame(linhas[1:], columns=[str(c) for c in linhas[0]])
+        return pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
+
+
+def _alvara_salvar(df):
+    url = _alvara_script_url()
+    if not url:
+        return False
+    df_s = df.copy().fillna("").astype(str)
+    dados = [df_s.columns.tolist()] + df_s.values.tolist()
+    try:
+        r = requests.post(url,
+                          json={"token": _alvara_script_token(), "aba": _ABA_ALVARA, "dados": dados},
+                          allow_redirects=True, timeout=30)
+        return r.json().get("ok", False)
+    except Exception:
+        return False
+
+
+def _classifica_vencimento_alvara(data_str):
+    from datetime import date, timedelta
+    today = date.today()
+    vence30 = today + timedelta(days=30)
+    try:
+        dt = pd.to_datetime(data_str, dayfirst=True, errors="coerce")
+        if pd.isna(dt):
+            return "Sem Data"
+        d = dt.date()
+        if d < today:
+            return "Vencido"
+        elif d <= vence30:
+            return "Vencendo"
+        else:
+            return "Válido"
+    except Exception:
+        return "Sem Data"
+
+
+@st.dialog("Alvarás — Vencendo (até 30 dias)")
+def _modal_alvara_vencendo(df_show):
+    st.markdown(f"**{df_show.shape[0]} empresa(s) com alvará vencendo em até 30 dias**")
+    st.dataframe(df_show.reset_index(drop=True), use_container_width=True, hide_index=True)
+
+
+@st.dialog("Alvarás — Vencidos")
+def _modal_alvara_vencidos(df_show):
+    st.markdown(f"**{df_show.shape[0]} empresa(s) com alvará vencido**")
+    st.dataframe(df_show.reset_index(drop=True), use_container_width=True, hide_index=True)
+
+
+def pagina_alvaras():
+    import plotly.graph_objects as go
+    st.empty()
+
+    st.markdown("<h2 style='color:#1d3f77;'>ALVARÁS</h2>", unsafe_allow_html=True)
+
+    # ── Botões de controle ────────────────────────────────────────────────────
+    col_rf, col_esp = st.columns([1, 4])
+    with col_rf:
+        if st.button("🔄 Atualizar do Sheets", key="btn_alvara_refresh", use_container_width=True):
+            for k in ["alvara_df"]:
+                if k in st.session_state:
+                    del st.session_state[k]
+            if "editor_alvaras" in st.session_state:
+                del st.session_state["editor_alvaras"]
+            st.rerun()
+
+    # ── Monta / carrega DataFrame de trabalho ─────────────────────────────────
+    if "alvara_df" not in st.session_state:
+        df_geral = le_planilha_google(GOOGLE_SHEET_URL, SHEET_EMPRESAS)
+        df_sheets = _alvara_carregar()
+
+        if df_geral is not None and not df_geral.empty and "Situação" in df_geral.columns:
+            mask_ativa = df_geral["Situação"].astype(str).str.upper() == "ATIVA"
+            df_base = df_geral[mask_ativa][
+                [c for c in ["Código", "Razão Social", "CNPJ", "Município", "Estado"] if c in df_geral.columns]
+            ].copy()
+            df_base = df_base.rename(columns={"Razão Social": "Nome"})
+            df_base["Código"] = df_base["Código"].apply(
+                lambda v: str(v).strip().removesuffix(".0") if pd.notna(v) else ""
+            )
+            if "CNPJ" in df_base.columns:
+                df_base["CNPJ"] = df_base["CNPJ"].apply(_formata_cnpj_mascara)
+        else:
+            df_base = pd.DataFrame(columns=["Código", "Nome", "CNPJ", "Município", "Estado"])
+
+        for c in ["Usuário", "Senha",
+                  "Alvará de Localização", "Vencimento Localização",
+                  "Alvará Sanitário", "Vencimento Sanitário",
+                  "Cert. Bombeiros", "Vencimento Bombeiros"]:
+            df_base[c] = ""
+
+        # Sobrepõe dados salvos do Sheets
+        if not df_sheets.empty and "Código" in df_sheets.columns:
+            df_sheets["Código"] = df_sheets["Código"].astype(str).str.strip()
+            df_idx = df_sheets.set_index("Código")
+            for col in ["Usuário", "Senha",
+                        "Alvará de Localização", "Vencimento Localização",
+                        "Alvará Sanitário", "Vencimento Sanitário",
+                        "Cert. Bombeiros", "Vencimento Bombeiros"]:
+                if col in df_idx.columns:
+                    mapeado = df_base["Código"].map(df_idx[col])
+                    df_base[col] = mapeado.where(mapeado.notna() & (mapeado != ""), df_base[col])
+
+        df_base = df_base.reset_index(drop=True)
+        st.session_state["alvara_df"] = df_base
+
+    df_work = st.session_state["alvara_df"].copy()
+
+    # ── Classificação por vencimento ──────────────────────────────────────────
+    def _classifica_coluna(col_alvara, col_venc):
+        resultado = []
+        for _, row in df_work.iterrows():
+            tem = str(row.get(col_alvara, "")).strip().upper() == "SIM"
+            if not tem:
+                resultado.append("Sem Alvará")
+            else:
+                resultado.append(_classifica_vencimento_alvara(str(row.get(col_venc, ""))))
+        return resultado
+
+    df_work["_st_loc"]  = _classifica_coluna("Alvará de Localização", "Vencimento Localização")
+    df_work["_st_san"]  = _classifica_coluna("Alvará Sanitário",       "Vencimento Sanitário")
+    df_work["_st_bomb"] = _classifica_coluna("Cert. Bombeiros",         "Vencimento Bombeiros")
+
+    # ── Função de donut reutilizável ──────────────────────────────────────────
+    def _donut(status_col, titulo, chart_key):
+        serie = df_work[status_col]
+        com_alvara = serie[serie != "Sem Alvará"]
+        validos  = (com_alvara == "Válido").sum()
+        vencendo = (com_alvara == "Vencendo").sum()
+        vencidos = (com_alvara == "Vencido").sum()
+        total    = int(com_alvara.shape[0])
+
+        fig = go.Figure(data=[go.Pie(
+            labels=["Válidos", "Vencendo", "Vencidos"],
+            values=[int(validos), int(vencendo), int(vencidos)],
+            hole=0.68,
+            marker=dict(colors=["#27ae60", "#f39c12", "#e74c3c"],
+                        line=dict(color="#ffffff", width=3)),
+            textinfo="none",
+            hovertemplate="<b>%{label}</b><br>%{value} empresa(s)<extra></extra>",
+            direction="clockwise",
+            sort=False,
+        )])
+        fig.update_layout(
+            paper_bgcolor="white", plot_bgcolor="white",
+            showlegend=False,
+            margin=dict(t=8, b=8, l=8, r=8),
+            height=200,
+            annotations=[dict(
+                text=f"<b>{total}</b><br><span style='font-size:10px'>com alvará</span>",
+                x=0.5, y=0.5, xanchor="center", yanchor="middle",
+                showarrow=False, font=dict(size=18, color="#1d3f77"),
+            )],
+        )
+        st.markdown(
+            f"<h4 style='text-align:center; color:#1d3f77; margin:4px 0; font-size:14px;'>{titulo}</h4>",
+            unsafe_allow_html=True,
+        )
+        st.plotly_chart(fig, use_container_width=True, key=chart_key)
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.markdown(
+                f"<div style='text-align:center; padding:5px; background:#eafaf1; "
+                f"border-radius:8px; border-left:3px solid #27ae60;'>"
+                f"<b style='font-size:16px; color:#27ae60;'>{validos}</b><br>"
+                f"<span style='font-size:10px;'>Válidos</span></div>",
+                unsafe_allow_html=True,
+            )
+        with c2:
+            st.markdown(
+                f"<div style='text-align:center; padding:5px; background:#fef9e7; "
+                f"border-radius:8px; border-left:3px solid #f39c12;'>"
+                f"<b style='font-size:16px; color:#f39c12;'>{vencendo}</b><br>"
+                f"<span style='font-size:10px;'>Vencendo</span></div>",
+                unsafe_allow_html=True,
+            )
+        with c3:
+            st.markdown(
+                f"<div style='text-align:center; padding:5px; background:#fdf2f2; "
+                f"border-radius:8px; border-left:3px solid #e74c3c;'>"
+                f"<b style='font-size:16px; color:#e74c3c;'>{vencidos}</b><br>"
+                f"<span style='font-size:10px;'>Vencidos</span></div>",
+                unsafe_allow_html=True,
+            )
+
+    # ── 3 Dashboards lado a lado ──────────────────────────────────────────────
+    col_d1, col_d2, col_d3 = st.columns(3)
+
+    with col_d1:
+        _donut("_st_loc", "Alvará de Localização e Funcionamento", "chart_alv_loc")
+        st.markdown("<br>", unsafe_allow_html=True)
+        b1, b2 = st.columns(2)
+        with b1:
+            if st.button("Ver Vencendo", key="btn_loc_ve", use_container_width=True):
+                df_m = df_work[df_work["_st_loc"] == "Vencendo"][
+                    ["Código", "Nome", "CNPJ", "Município", "Vencimento Localização"]
+                ].reset_index(drop=True)
+                _modal_alvara_vencendo(df_m)
+        with b2:
+            if st.button("Ver Vencidos", key="btn_loc_vd", use_container_width=True):
+                df_m = df_work[df_work["_st_loc"] == "Vencido"][
+                    ["Código", "Nome", "CNPJ", "Município", "Vencimento Localização"]
+                ].reset_index(drop=True)
+                _modal_alvara_vencidos(df_m)
+
+    with col_d2:
+        _donut("_st_san", "Alvará Sanitário", "chart_alv_san")
+        st.markdown("<br>", unsafe_allow_html=True)
+        b1, b2 = st.columns(2)
+        with b1:
+            if st.button("Ver Vencendo", key="btn_san_ve", use_container_width=True):
+                df_m = df_work[df_work["_st_san"] == "Vencendo"][
+                    ["Código", "Nome", "CNPJ", "Município", "Vencimento Sanitário"]
+                ].reset_index(drop=True)
+                _modal_alvara_vencendo(df_m)
+        with b2:
+            if st.button("Ver Vencidos", key="btn_san_vd", use_container_width=True):
+                df_m = df_work[df_work["_st_san"] == "Vencido"][
+                    ["Código", "Nome", "CNPJ", "Município", "Vencimento Sanitário"]
+                ].reset_index(drop=True)
+                _modal_alvara_vencidos(df_m)
+
+    with col_d3:
+        _donut("_st_bomb", "Certificado do Corpo de Bombeiros", "chart_alv_bomb")
+        st.markdown("<br>", unsafe_allow_html=True)
+        b1, b2 = st.columns(2)
+        with b1:
+            if st.button("Ver Vencendo", key="btn_bomb_ve", use_container_width=True):
+                df_m = df_work[df_work["_st_bomb"] == "Vencendo"][
+                    ["Código", "Nome", "CNPJ", "Município", "Vencimento Bombeiros"]
+                ].reset_index(drop=True)
+                _modal_alvara_vencendo(df_m)
+        with b2:
+            if st.button("Ver Vencidos", key="btn_bomb_vd", use_container_width=True):
+                df_m = df_work[df_work["_st_bomb"] == "Vencido"][
+                    ["Código", "Nome", "CNPJ", "Município", "Vencimento Bombeiros"]
+                ].reset_index(drop=True)
+                _modal_alvara_vencidos(df_m)
+
+    st.divider()
+
+    # ── Total de empresas com cada alvará ─────────────────────────────────────
+    total_loc  = (df_work["Alvará de Localização"].astype(str).str.upper() == "SIM").sum()
+    total_san  = (df_work["Alvará Sanitário"].astype(str).str.upper() == "SIM").sum()
+    total_bomb = (df_work["Cert. Bombeiros"].astype(str).str.upper() == "SIM").sum()
+
+    st.markdown(
+        f"<div style='background:#f4f6fa; border-radius:10px; padding:12px 16px; margin-bottom:12px;'>"
+        f"<b style='color:#1d3f77;'>Total de empresas com cada alvará:</b> &nbsp;&nbsp;"
+        f"<span style='color:#1d3f77; font-weight:600;'>Localização:</span> <b>{total_loc}</b>"
+        f" &nbsp;|&nbsp; "
+        f"<span style='color:#1d3f77; font-weight:600;'>Sanitário:</span> <b>{total_san}</b>"
+        f" &nbsp;|&nbsp; "
+        f"<span style='color:#1d3f77; font-weight:600;'>Bombeiros:</span> <b>{total_bomb}</b>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    # ── Tabela editável ───────────────────────────────────────────────────────
+    st.markdown("### Cadastro de Alvarás")
+    st.markdown(
+        "<p style='font-size:13px; color:#666;'>"
+        "Use <b>SIM</b> ou <b>NÃO</b> nas colunas de alvará. "
+        "Informe datas no formato <b>DD/MM/AAAA</b>. "
+        "Clique em <b>Salvar no Sheets</b> para não perder os dados.</p>",
+        unsafe_allow_html=True,
+    )
+
+    cols_exib = ["Código", "Nome", "CNPJ", "Município", "Estado",
+                 "Usuário", "Senha",
+                 "Alvará de Localização", "Vencimento Localização",
+                 "Alvará Sanitário", "Vencimento Sanitário",
+                 "Cert. Bombeiros", "Vencimento Bombeiros"]
+    df_edit = df_work[[c for c in cols_exib if c in df_work.columns]].copy()
+
+    df_editado = st.data_editor(
+        df_edit,
+        key="editor_alvaras",
+        use_container_width=True,
+        height=500,
+        hide_index=True,
+        disabled=["Código", "Nome", "CNPJ", "Município", "Estado"],
+        column_config={
+            "Código":                  st.column_config.TextColumn("Código",       width="small"),
+            "Nome":                    st.column_config.TextColumn("Nome",          width="large"),
+            "CNPJ":                    st.column_config.TextColumn("CNPJ",          width="medium"),
+            "Município":               st.column_config.TextColumn("Município",     width="medium"),
+            "Estado":                  st.column_config.TextColumn("Estado",        width="small"),
+            "Usuário":                 st.column_config.TextColumn("Usuário",       width="medium"),
+            "Senha":                   st.column_config.TextColumn("Senha",         width="medium"),
+            "Alvará de Localização":   st.column_config.SelectboxColumn(
+                                           "Alvará Localização",
+                                           options=["", "SIM", "NÃO"], width="small"),
+            "Vencimento Localização":  st.column_config.TextColumn("Vencto. Localização", width="medium"),
+            "Alvará Sanitário":        st.column_config.SelectboxColumn(
+                                           "Alvará Sanitário",
+                                           options=["", "SIM", "NÃO"], width="small"),
+            "Vencimento Sanitário":    st.column_config.TextColumn("Vencto. Sanitário",   width="medium"),
+            "Cert. Bombeiros":         st.column_config.SelectboxColumn(
+                                           "Cert. Bombeiros",
+                                           options=["", "SIM", "NÃO"], width="small"),
+            "Vencimento Bombeiros":    st.column_config.TextColumn("Vencto. Bombeiros",   width="medium"),
+        },
+    )
+
+    # ── Botão Salvar ──────────────────────────────────────────────────────────
+    col_sv, _ = st.columns([1, 3])
+    with col_sv:
+        if st.button("💾 Salvar no Sheets", key="btn_alvara_salvar",
+                     type="primary", use_container_width=True):
+            st.session_state["alvara_df"] = df_editado.copy()
+            if "editor_alvaras" in st.session_state:
+                del st.session_state["editor_alvaras"]
+            ok = _alvara_salvar(df_editado)
+            if ok:
+                st.success("Dados salvos com sucesso no Google Sheets!")
+            else:
+                st.warning("Não foi possível salvar no Sheets. Verifique a configuração SCRIPT_URL nos secrets.")
+
+
+# ============================================================================
 # ROTEAMENTO
 # ============================================================================
 
@@ -3333,3 +3681,5 @@ with st.session_state.main_container.container():
         pagina_sefaz_comparacao()
     elif pagina == "COMPARAÇÃO DE IMPOSTOS":
         pagina_comparacao_impostos()
+    elif pagina == "ALVARÁS":
+        pagina_alvaras()
