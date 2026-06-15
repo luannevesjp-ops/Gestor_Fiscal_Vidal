@@ -525,9 +525,12 @@ def _importar_empresas_sheets():
                 f"Coluna 'ativo' não encontrada. "
                 f"Colunas: {', '.join(df.columns.tolist())}"
             )
-        df_ativas = df[df["ativo"].astype(str).str.split(".").str[0] == "1"].copy()
+        df_ativas = df[df["ativo"].apply(
+            lambda x: str(x).strip().upper().split(".")[0] in ("1", "ATIVA")
+        )].copy()
         if df_ativas.empty:
-            return -1, f"Nenhuma empresa com ativo=1 encontrada. Total na planilha: {len(df)}"
+            vals = df["ativo"].dropna().astype(str).unique().tolist()
+            return -1, f"Nenhuma empresa ativa encontrada. Valores na coluna 'ativo': {vals}"
     else:
         # Formato legado: Código, Razão Social, Situação
         if "Situação" not in df.columns:
