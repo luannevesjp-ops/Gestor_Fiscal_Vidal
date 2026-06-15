@@ -3395,6 +3395,10 @@ def _alvara_carregar():
         resp.raise_for_status()
         df = pd.read_excel(BytesIO(resp.content), sheet_name=_ABA_ALVARA, engine="openpyxl")
         df.columns = df.columns.str.strip()
+        for col in ["Vencimento Localização", "Vencimento Sanitário", "Vencimento Bombeiros"]:
+            if col in df.columns:
+                parsed = pd.to_datetime(df[col], dayfirst=True, errors="coerce")
+                df[col] = parsed.dt.strftime("%d/%m/%Y").fillna("")
         return df
     except Exception:
         return pd.DataFrame()
