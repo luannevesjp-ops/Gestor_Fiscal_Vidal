@@ -1073,7 +1073,13 @@ def pagina_calendario():
         "SELECT dia, conteudo FROM calendario_eventos WHERE competencia=?", (comp,)
     ).fetchall()
     conn.close()
-    eventos = {r[0]: r[1] for r in rows}
+    # Converte chave para int para garantir match (Sheets pode retornar "1.0" em vez de 1)
+    eventos = {}
+    for r in rows:
+        try:
+            eventos[int(float(str(r[0])))] = r[1]
+        except (ValueError, TypeError):
+            pass
 
     dias_semana = ["DOM", "SEG", "TER", "QUA", "QUI", "SEX", "SÁB"]
 
@@ -1143,6 +1149,43 @@ def pagina_calendario():
             conn.close()
             _sincronizar_sheets("calendario_eventos")
             st.success("Calendário salvo e sincronizado!")
+
+    with st.expander("🔍 Diagnóstico de sincronização (suporte técnico)", expanded=False):
+        if st.button("Verificar Calendário no Sheets", key="diag_cal_btn"):
+            df_sh = _sheets_carregar("calendario_eventos")
+            conn2  = get_conn()
+            df_loc = pd.read_sql_query(
+                "SELECT * FROM calendario_eventos WHERE competencia=?", conn2, params=[comp]
+            )
+            conn2.close()
+
+            st.markdown(f"**Competência analisada:** `{comp}`")
+            st.markdown(f"**Sheets — aba CALENDARIO:** {len(df_sh)} linha(s) no total")
+            if not df_sh.empty:
+                st.write("Colunas no Sheets:", df_sh.columns.tolist())
+                df_comp = df_sh[df_sh["competencia"] == comp] if "competencia" in df_sh.columns else pd.DataFrame()
+                st.markdown(f"Linhas desta competência no Sheets: **{len(df_comp)}**")
+                if not df_comp.empty:
+                    st.dataframe(df_comp, use_container_width=True)
+            else:
+                st.error("⚠️ Aba CALENDARIO não encontrada ou vazia no Sheets. "
+                         "Preencha alguma data e clique em 'Salvar Calendário' para criar a aba.")
+
+            st.markdown(f"**SQLite local:** {len(df_loc)} linha(s) para esta competência")
+            if not df_loc.empty:
+                st.write("Tipos das colunas no SQLite:", df_loc.dtypes.to_dict())
+                st.dataframe(df_loc, use_container_width=True)
+            else:
+                st.info("Nenhum evento desta competência no banco local.")
+
+            if not df_sh.empty and "competencia" in df_sh.columns:
+                st.markdown("---")
+                st.markdown("**Tentando restaurar agora...**")
+                ok = _sheets_restaurar("calendario_eventos")
+                if ok:
+                    st.success("✅ Restaurado com sucesso! Recarregue a página para ver os dados.")
+                else:
+                    st.error("❌ Falha ao restaurar. Verifique os dados acima.")
 
 # ============================================================================
 # MENUS: MUNICIPAL / ESTADUAL / FEDERAL / SIMPLES NACIONAL
