@@ -738,8 +738,12 @@ def _download_btn(df, nome, key):
 def _menu_controle(titulo, table, filtro_fn, colunas, edit_gestor, edit_fiscal, key):
     st.markdown(f"<h2 style='color:#1d3f77;'>{titulo}</h2>", unsafe_allow_html=True)
 
-    df_vazio = pd.DataFrame(columns=["responsavel"])
-    comp, resp = _filtros_comp_resp(df_vazio, key)
+    df_emp = _load("empresas_controle", "ativo=1")
+    if not df_emp.empty and "responsavel_fiscal" in df_emp.columns:
+        df_resp = df_emp[["responsavel_fiscal"]].rename(columns={"responsavel_fiscal": "responsavel"})
+    else:
+        df_resp = pd.DataFrame(columns=["responsavel"])
+    comp, resp = _filtros_comp_resp(df_resp, key)
 
     _auto_populate(table, comp, filtro_fn)
 
