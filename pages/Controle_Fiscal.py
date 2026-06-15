@@ -867,6 +867,14 @@ if st.sidebar.button("Sair", use_container_width=True):
     st.session_state["autenticado"]  = False
     st.switch_page("Gestor_Fiscal.py")
 
+st.sidebar.markdown("<hr style='margin:8px 0;'>", unsafe_allow_html=True)
+if st.sidebar.button("🔄 Recarregar do Sheets", use_container_width=True, key="btn_reload_all"):
+    with st.spinner("Recarregando dados do Sheets..."):
+        for _tbl in _ABA.keys():
+            if _tbl != "alteracao_empresa":
+                _sheets_restaurar(_tbl)
+    st.rerun()
+
 # ============================================================================
 # MENU: EMPRESAS
 # ============================================================================
@@ -1247,32 +1255,6 @@ def pagina_parcelamentos():
         with col_d:
             _download_btn(df_show.drop(columns=["id"], errors="ignore"), "parcelamentos", "parc")
 
-    if st.button("📥 Carregar Parcelamentos do Sheets", key="parc_carregar_sheets"):
-        df_sh = _sheets_carregar("parcelamentos")
-        if df_sh.empty:
-            st.error("Sheets vazio ou aba 'PARCELAMENTOS' não encontrada.")
-        else:
-            conn = get_conn()
-            try:
-                schema_cols = {
-                    r[1] for r in conn.execute("PRAGMA table_info(parcelamentos)").fetchall()
-                } - {"id"}
-                cols_val = [c for c in df_sh.columns if c in schema_cols]
-                if not cols_val:
-                    st.error(f"Colunas do Sheets não batem com o sistema. Contate o suporte.")
-                    conn.close()
-                else:
-                    df_ins = df_sh[cols_val].copy().fillna("")
-                    conn.execute("DELETE FROM parcelamentos")
-                    df_ins.to_sql("parcelamentos", conn, if_exists="append", index=False)
-                    conn.commit()
-                    conn.close()
-                    _sincronizar_sheets("parcelamentos")
-                    st.success(f"✅ {len(df_ins)} parcelamento(s) carregado(s) do Sheets!")
-                    st.rerun()
-            except Exception as ex:
-                conn.close()
-                st.error(f"Erro ao carregar: {ex}")
 
 # ============================================================================
 # MENU: SENHAS E ACESSOS
@@ -1336,35 +1318,6 @@ def pagina_senhas():
         with col_d:
             _download_btn(df_show.drop(columns=["id"], errors="ignore"), "senhas_acessos", "sen")
 
-    if st.button("📥 Carregar Senhas e Acessos do Sheets", key="sen_carregar_sheets"):
-        df_sh = _sheets_carregar("senhas_acessos")
-        if df_sh.empty:
-            st.error("Sheets vazio ou aba 'SENHAS E ACESSOS' não encontrada.")
-        else:
-            col_map = _SHEETS_COL_RENAME.get("senhas_acessos", {})
-            if col_map:
-                df_sh = df_sh.rename(columns=col_map)
-            conn = get_conn()
-            try:
-                schema_cols = {
-                    r[1] for r in conn.execute("PRAGMA table_info(senhas_acessos)").fetchall()
-                } - {"id"}
-                cols_val = [c for c in df_sh.columns if c in schema_cols]
-                if not cols_val:
-                    st.error("Colunas do Sheets não batem com o sistema. Contate o suporte.")
-                    conn.close()
-                else:
-                    df_ins = df_sh[cols_val].copy().fillna("")
-                    conn.execute("DELETE FROM senhas_acessos")
-                    df_ins.to_sql("senhas_acessos", conn, if_exists="append", index=False)
-                    conn.commit()
-                    conn.close()
-                    _sincronizar_sheets("senhas_acessos")
-                    st.success(f"✅ {len(df_ins)} senha(s)/acesso(s) carregado(s) do Sheets!")
-                    st.rerun()
-            except Exception as ex:
-                conn.close()
-                st.error(f"Erro ao carregar: {ex}")
 
 # ============================================================================
 # MENU: OBRIGAÇÕES E PRAZOS
