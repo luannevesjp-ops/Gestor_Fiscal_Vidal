@@ -15,8 +15,8 @@ from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
 from st_aggrid.shared import JsCode
 
 # ── Planilha de importação (somente leitura) ─────────────────────────────────
-_SHEET_URL   = "https://docs.google.com/spreadsheets/d/1bp7qtkKvsMHMvHjGznT6OwyX_YSQWMa3jVvylOJWSxM/export?format=xlsx"
-_SHEET_GERAL = "GERAL"
+_SHEET_URL   = "https://docs.google.com/spreadsheets/d/1mDsIQ8sWefY0Xa0Q2tYjW86p0ngdy-B2OyRd6nTc57w/export?format=xlsx"
+_SHEET_GERAL = "EMPRESAS"
 
 # ── Mapeamento tabela SQLite → aba da planilha de backup ─────────────────────
 _ABA = {
@@ -820,13 +820,13 @@ def pagina_empresas_ctrl():
                         )
                         conn.commit()
                         st.success(f"Empresa '{n_razao}' adicionada!")
+                        _sincronizar_sheets("empresas_controle")
+                        _sincronizar_sheets("alteracao_empresa")
                         st.rerun()
                     except Exception as ex:
                         st.error(f"Erro: {ex}")
                     finally:
                         conn.close()
-                    _sincronizar_sheets("empresas_controle")
-                    _sincronizar_sheets("alteracao_empresa")
 
     df = _load("empresas_controle", "ativo=1")
     if df.empty:
@@ -901,9 +901,9 @@ def pagina_empresas_ctrl():
                 )
                 conn.commit()
                 conn.close()
-                _sincronizar_sheets("empresas_controle")
+                _sheets_salvar("empresas_controle", _load("empresas_controle", "ativo=1"))
                 _sincronizar_sheets("alteracao_empresa")
-                st.success(f"Empresa '{r['razao_social']}' excluída.")
+                st.success(f"Empresa '{r['razao_social']}' excluída e sincronizada!")
                 st.rerun()
 
 # ============================================================================
