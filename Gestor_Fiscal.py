@@ -3388,17 +3388,31 @@ _ABA_ALVARA        = "ALVARA"
 _ALVARA_SHEET_URL  = "https://docs.google.com/spreadsheets/d/1mDsIQ8sWefY0Xa0Q2tYjW86p0ngdy-B2OyRd6nTc57w/export?format=xlsx"
 
 
+def _normaliza_data_br(val):
+    """Converte qualquer formato de data para DD/MM/AAAA. Retorna '' se inválido."""
+    s = str(val).strip()
+    if s in ("", "nan", "None", "NaT", "NaN"):
+        return ""
+    try:
+        dt = pd.to_datetime(s, dayfirst=True, errors="coerce")
+        if pd.isna(dt):
+            dt = pd.to_datetime(s, dayfirst=False, errors="coerce")
+        return dt.strftime("%d/%m/%Y") if not pd.isna(dt) else ""
+    except Exception:
+        return ""
+
+
 @st.cache_data(ttl=60)
 def _alvara_carregar():
     try:
         resp = requests.get(_ALVARA_SHEET_URL, timeout=30)
         resp.raise_for_status()
-        df = pd.read_excel(BytesIO(resp.content), sheet_name=_ABA_ALVARA, engine="openpyxl")
+        df = pd.read_excel(BytesIO(resp.content), sheet_name=_ABA_ALVARA,
+                           engine="openpyxl", dtype=str)
         df.columns = df.columns.str.strip()
         for col in ["Vencimento Localização", "Vencimento Sanitário", "Vencimento Bombeiros"]:
             if col in df.columns:
-                parsed = pd.to_datetime(df[col], dayfirst=True, errors="coerce")
-                df[col] = parsed.dt.strftime("%d/%m/%Y").fillna("")
+                df[col] = df[col].fillna("").apply(_normaliza_data_br)
         return df
     except Exception:
         return pd.DataFrame()
@@ -3696,10 +3710,13 @@ def pagina_alvaras():
 
     # Garante strings puras — SelectboxColumn não aceita NaN/float
     for col in df_edit.columns:
-        df_edit[col] = df_edit[col].fillna("").astype(str).replace({"nan": "", "None": ""})
+        df_edit[col] = df_edit[col].fillna("").astype(str).replace({"nan": "", "None": "", "NaT": ""})
     for col in ["Alvará de Localização", "Alvará Sanitário", "Cert. Bombeiros"]:
         if col in df_edit.columns:
             df_edit[col] = df_edit[col].apply(lambda v: v if v in ("SIM", "NÃO") else "")
+    for col in ["Vencimento Localização", "Vencimento Sanitário", "Vencimento Bombeiros"]:
+        if col in df_edit.columns:
+            df_edit[col] = df_edit[col].apply(_normaliza_data_br)
 
     df_editado = st.data_editor(
         df_edit,
