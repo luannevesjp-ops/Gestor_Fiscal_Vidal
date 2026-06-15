@@ -326,7 +326,7 @@ elif st.session_state["menu_area"] == "PARALEGAL":
     paginas_disponiveis = ["DASHBOARD", "EMPRESAS", "CND MUNICIPAL", "SEM ACESSO", "ALVARÁS"]
 
 elif st.session_state["menu_area"] == "CONTÁBIL":
-    paginas_disponiveis = ["EMPRESAS"]
+    paginas_disponiveis = ["EMPRESAS", "OPTANTE SIMPLES"]
 
 else:
     paginas_disponiveis = ["EMPRESAS"]
@@ -3301,6 +3301,80 @@ def pagina_comparacao_impostos():
 
 
 # ============================================================================
+# OPTANTE SIMPLES — DEPARTAMENTO CONTÁBIL
+# ============================================================================
+
+_OPTANTE_SHEET_URL = "https://docs.google.com/spreadsheets/d/1mDsIQ8sWefY0Xa0Q2tYjW86p0ngdy-B2OyRd6nTc57w/export?format=xlsx"
+_OPTANTE_ABA       = "OPTANTE"
+_OPTANTE_COLUNAS   = [
+    "CÓDIGO", "CNPJ", "Razão Social", "Situação Cadastral",
+    "Optante Simples Nacional", "Data Opção Simples", "Data Exclusão Simples",
+    "Optante MEI", "Status Consulta",
+]
+
+@st.cache_data(ttl=300)
+def _le_optante_sheets():
+    try:
+        resp = requests.get(_OPTANTE_SHEET_URL)
+        resp.raise_for_status()
+        df = pd.read_excel(BytesIO(resp.content), sheet_name=_OPTANTE_ABA, engine="openpyxl")
+        df.columns = df.columns.str.strip()
+        colunas_presentes = [c for c in _OPTANTE_COLUNAS if c in df.columns]
+        df = df[colunas_presentes].copy()
+        if "CNPJ" in df.columns:
+            df["CNPJ"] = df["CNPJ"].apply(_formata_cnpj_mascara)
+        for col in ["Data Opção Simples", "Data Exclusão Simples"]:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors="coerce").dt.strftime("%d/%m/%Y").fillna("")
+        return df
+    except Exception as e:
+        st.error(f"Erro ao carregar aba OPTANTE: {e}")
+        return pd.DataFrame(columns=_OPTANTE_COLUNAS)
+
+
+def pagina_optante_simples():
+    st.empty()
+    st.markdown("<h2 style='color:#1d3f77;'>OPTANTE SIMPLES NACIONAL</h2>", unsafe_allow_html=True)
+
+    col_rf, _ = st.columns([1, 4])
+    with col_rf:
+        if st.button("🔄 Atualizar", key="btn_optante_refresh", use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
+
+    df = _le_optante_sheets()
+    if df is None or df.empty:
+        st.warning("Nenhum dado encontrado na aba OPTANTE.")
+        return
+
+    total = df.shape[0]
+    optantes_sn  = (df["Optante Simples Nacional"].astype(str).str.upper() == "SIM").sum() \
+        if "Optante Simples Nacional" in df.columns else 0
+    optantes_mei = (df["Optante MEI"].astype(str).str.upper() == "SIM").sum() \
+        if "Optante MEI" in df.columns else 0
+
+    st.markdown(
+        f"<p style='text-align:right; font-size:18px;'>"
+        f"<b>Total:</b> {total} &nbsp;|&nbsp; "
+        f"<b>Optantes SN:</b> {optantes_sn} &nbsp;|&nbsp; "
+        f"<b>Optantes MEI:</b> {optantes_mei}"
+        f"</p>",
+        unsafe_allow_html=True,
+    )
+
+    df_exib = _sanitiza_df(df)
+    exibe_aggrid(df_exib, height=600, grid_key="grid_optante_simples")
+
+    output = BytesIO()
+    df.to_excel(output, index=False)
+    st.download_button(
+        "Baixar Excel", data=output.getvalue(),
+        file_name="optante_simples.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+# ============================================================================
 # ALVARÁS — DEPARTAMENTO PARALEGAL
 # ============================================================================
 
@@ -3683,3 +3757,5 @@ with st.session_state.main_container.container():
         pagina_comparacao_impostos()
     elif pagina == "ALVARÁS":
         pagina_alvaras()
+    elif pagina == "OPTANTE SIMPLES":
+        pagina_optante_simples()
