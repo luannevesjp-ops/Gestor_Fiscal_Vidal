@@ -372,6 +372,19 @@ def _sheets_carregar(table_name):
         return pd.DataFrame()
 
 
+def _converter_competencia_iso(val):
+    """Converte data ISO do Sheets (ex: '2026-05-01T03:00:00.000Z') para 'MM/AAAA'."""
+    s = str(val).strip()
+    if "T" in s and len(s) > 10:
+        try:
+            from datetime import datetime as _dt
+            dt = _dt.fromisoformat(s.replace("Z", "+00:00"))
+            return f"{dt.month:02d}/{dt.year}"
+        except Exception:
+            pass
+    return s
+
+
 def _sheets_restaurar(table_name):
     df = _sheets_carregar(table_name)
     if df.empty:
@@ -382,6 +395,11 @@ def _sheets_restaurar(table_name):
         col_map = _SHEETS_COL_RENAME.get(table_name, {})
         if col_map:
             df = df.rename(columns=col_map)
+
+        # Corrige competencia que o Sheets auto-converteu para data ISO (ex: calendario_eventos)
+        if "competencia" in df.columns:
+            df["competencia"] = df["competencia"].apply(_converter_competencia_iso)
+
         # Descobre colunas reais do SQLite (exclui 'id' para evitar conflito com AUTOINCREMENT)
         schema_cols = {
             row[1] for row in
@@ -873,7 +891,11 @@ if st.sidebar.button("🔄 Recarregar do Sheets", use_container_width=True, key=
     with st.spinner("Recarregando dados do Sheets..."):
         for _tbl in _ABA.keys():
             if _tbl != "alteracao_empresa":
-                _res_reload[_tbl] = _sheets_restaurar(_tbl)
+                ok = _sheets_restaurar(_tbl)
+                _res_reload[_tbl] = ok
+                # Re-salva calendario no Sheets para corrigir formato de data auto-convertido
+                if ok and _tbl == "calendario_eventos":
+                    _sincronizar_sheets("calendario_eventos")
     st.session_state["_reload_result"] = _res_reload
     st.rerun()
 
