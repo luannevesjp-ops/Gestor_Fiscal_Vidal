@@ -326,7 +326,7 @@ elif st.session_state["menu_area"] == "PARALEGAL":
     paginas_disponiveis = ["DASHBOARD", "EMPRESAS", "CND MUNICIPAL", "SEM ACESSO", "ALVARÁS"]
 
 elif st.session_state["menu_area"] == "CONTÁBIL":
-    paginas_disponiveis = ["EMPRESAS", "OPTANTE SIMPLES"]
+    paginas_disponiveis = ["EMPRESAS", "OPTANTE SIMPLES", "RECEITA X DESPESA"]
 
 else:
     paginas_disponiveis = ["EMPRESAS"]
@@ -3380,6 +3380,176 @@ def pagina_optante_simples():
 
 
 # ============================================================================
+# RECEITA X DESPESA — DEPARTAMENTO CONTÁBIL
+# ============================================================================
+
+_MOV_ABA      = "MOVIMENTO"
+_MOV_COLUNAS  = ["Código", "CNPJ", "Nome", "Entradas", "Saídas", "Serviços"]
+
+
+@st.cache_data(ttl=300)
+def _le_movimento_sheets():
+    try:
+        resp = requests.get(GOOGLE_SHEET_URL, timeout=30)
+        resp.raise_for_status()
+        df = pd.read_excel(BytesIO(resp.content), sheet_name=_MOV_ABA, engine="openpyxl")
+        df.columns = df.columns.str.strip()
+        colunas_presentes = [c for c in _MOV_COLUNAS if c in df.columns]
+        df = df[colunas_presentes].copy()
+        if "CNPJ" in df.columns:
+            df["CNPJ"] = df["CNPJ"].apply(_formata_cnpj_mascara)
+        for col in ["Entradas", "Saídas", "Serviços"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+        return df
+    except Exception as e:
+        st.error(f"Erro ao carregar aba MOVIMENTO: {e}")
+        return pd.DataFrame(columns=_MOV_COLUNAS)
+
+
+def _fmt_brl(v):
+    """Formata número como moeda brasileira (ex: R$ 1.234,56)."""
+    try:
+        return f"R$ {float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    except Exception:
+        return str(v)
+
+
+def pagina_receita_despesa():
+    import plotly.express as px
+    st.empty()
+    st.markdown("<h2 style='color:#1d3f77;'>RECEITA X DESPESA</h2>", unsafe_allow_html=True)
+
+    col_rf, _ = st.columns([1, 4])
+    with col_rf:
+        if st.button("🔄 Atualizar", key="btn_mov_refresh", use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
+
+    df = _le_movimento_sheets()
+    if df is None or df.empty:
+        st.warning("Nenhum dado encontrado na aba MOVIMENTO.")
+        return
+
+    # Colunas calculadas
+    ent  = df["Entradas"].fillna(0)  if "Entradas"  in df.columns else pd.Series(0.0, index=df.index)
+    said = df["Saídas"].fillna(0)    if "Saídas"    in df.columns else pd.Series(0.0, index=df.index)
+    serv = df["Serviços"].fillna(0)  if "Serviços"  in df.columns else pd.Series(0.0, index=df.index)
+
+    df["Receita"]   = said + serv
+    df["Despesas"]  = ent
+    df["Resultado"] = df["Receita"] - df["Despesas"]
+
+    def _classifica(row):
+        if row[["Entradas", "Saídas", "Serviços"]].sum() == 0:
+            return "Sem Movimento"
+        if row["Resultado"] > 0:
+            return "Lucro"
+        if row["Resultado"] < 0:
+            return "Prejuízo"
+        return "Neutro"
+
+    df["Situação"] = df.apply(_classifica, axis=1)
+
+    total     = len(df)
+    n_lucro   = (df["Situação"] == "Lucro").sum()
+    n_prej    = (df["Situação"] == "Prejuízo").sum()
+    n_sem_mov = (df["Situação"] == "Sem Movimento").sum()
+
+    # ── KPIs ──────────────────────────────────────────────────────────────────
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total", total)
+    c2.metric("Lucro", int(n_lucro))
+    c3.metric("Prejuízo", int(n_prej))
+    c4.metric("Sem Movimento", int(n_sem_mov))
+
+    st.divider()
+
+    # ── DASHBOARD ─────────────────────────────────────────────────────────────
+    st.markdown("### Dashboard")
+
+    _CORES_SIT = {"Lucro": "#27ae60", "Prejuízo": "#e74c3c", "Sem Movimento": "#7f8c8d", "Neutro": "#bdc3c7"}
+
+    df_sit = (
+        df["Situação"].value_counts()
+        .rename_axis("Situação").reset_index(name="Quantidade")
+    )
+    df_sit = df_sit[df_sit["Quantidade"] > 0]
+
+    col_d1, col_d2 = st.columns([1, 2])
+
+    with col_d1:
+        if not df_sit.empty:
+            fig_donut = px.pie(
+                df_sit, names="Situação", values="Quantidade",
+                color="Situação",
+                color_discrete_map=_CORES_SIT,
+                hole=0.5,
+            )
+            fig_donut.update_traces(
+                textinfo="label+percent+value",
+                hovertemplate="<b>%{label}</b><br>Qtd: %{value}<extra></extra>",
+            )
+            fig_donut.update_layout(
+                plot_bgcolor="white", paper_bgcolor="white",
+                showlegend=True, height=350,
+                margin=dict(t=20, b=20, l=20, r=20),
+            )
+            st.plotly_chart(fig_donut, use_container_width=True, key="chart_mov_donut")
+
+    with col_d2:
+        df_res = df[df["Situação"].isin(["Lucro", "Prejuízo", "Neutro"])].copy()
+        if not df_res.empty:
+            nome_col = next(
+                (c for c in ["Nome", "Razão Social"] if c in df_res.columns),
+                df_res.columns[0],
+            )
+            df_res = df_res.sort_values("Resultado", ascending=True)
+
+            fig_bar = px.bar(
+                df_res, x="Resultado", y=nome_col,
+                orientation="h",
+                color="Situação",
+                color_discrete_map=_CORES_SIT,
+                text=df_res["Resultado"].apply(_fmt_brl),
+                custom_data=["Resultado"],
+            )
+            fig_bar.update_traces(
+                textposition="outside",
+                hovertemplate="<b>%{y}</b><br>Resultado: %{customdata[0]:,.2f}<extra></extra>",
+            )
+            fig_bar.update_layout(
+                plot_bgcolor="white", paper_bgcolor="white",
+                height=max(350, len(df_res) * 32),
+                margin=dict(t=20, b=20, l=10, r=120),
+                xaxis=dict(title="Resultado (R$)", showgrid=True, gridcolor="#eee"),
+                yaxis=dict(title=""),
+                showlegend=True,
+            )
+            st.plotly_chart(fig_bar, use_container_width=True, key="chart_mov_resultado")
+
+    st.divider()
+
+    # ── TABELA ────────────────────────────────────────────────────────────────
+    st.markdown("### Detalhamento")
+
+    df_exib = df.copy()
+    for col in ["Entradas", "Saídas", "Serviços", "Receita", "Despesas", "Resultado"]:
+        if col in df_exib.columns:
+            df_exib[col] = df_exib[col].apply(_fmt_brl)
+    df_exib = _sanitiza_df(df_exib)
+    exibe_aggrid(df_exib, height=500, grid_key="grid_receita_despesa")
+
+    output = BytesIO()
+    df.drop(columns=["Situação"], errors="ignore").to_excel(output, index=False)
+    st.download_button(
+        "Baixar Excel", data=output.getvalue(),
+        file_name="receita_despesa.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+# ============================================================================
 # ALVARÁS — DEPARTAMENTO PARALEGAL
 # ============================================================================
 
@@ -3805,3 +3975,5 @@ with st.session_state.main_container.container():
         pagina_alvaras()
     elif pagina == "OPTANTE SIMPLES":
         pagina_optante_simples()
+    elif pagina == "RECEITA X DESPESA":
+        pagina_receita_despesa()
