@@ -26,6 +26,8 @@ SHEET_EMPRESAS = "GERAL"
 SHEET_XML_DMS  = "Leitura Xml DMS"
 SHEET_XML_REST = "Leitura Xml REST"
 SHEET_SEFAZ = "SEFAZ"
+SHEET_SEFAZ_INICIAL = "SEFAZ INICIAL"
+SHEET_SEFAZ_FINAL   = "SEFAZ FINAL"
 
 # ============================================================================
 # CSS E ESTILOS
@@ -320,7 +322,7 @@ st.sidebar.markdown("<hr style='margin: 8px 0;'>", unsafe_allow_html=True)
 if st.session_state["menu_area"] == "FISCAL":
     paginas_disponiveis = ["EMPRESAS", "SIMPLES NACIONAL", "REINF", "DCTF WEB",
                            "DMS", "SERVIÇOS TOMADOS", "SEFAZ", "LEITURA XML DMS", "LEITURA XML REST",
-                           "SEFAZ COMPARAÇÃO", "COMPARAÇÃO DE IMPOSTOS"]
+                           "SEFAZ ALTERAÇÃO QUANTIDADE NOTAS", "COMPARAÇÃO DE IMPOSTOS"]
 
 elif st.session_state["menu_area"] == "PARALEGAL":
     paginas_disponiveis = ["DASHBOARD", "EMPRESAS", "CND MUNICIPAL", "SEM ACESSO", "ALVARÁS"]
@@ -2687,32 +2689,65 @@ def pagina_sem_acesso():
         st.success("Nenhuma pendência encontrada!")
 
 
-@st.dialog("SEFAZ COMPARAÇÃO — Divergências")
-def _modal_sefaz_comparacao(df_show):
-    st.markdown(f"**{df_show.shape[0]} empresa(s) com divergência**")
+@st.dialog("SEFAZ ALTERAÇÃO QUANTIDADE NOTAS — Alteradas")
+def _modal_sefaz_alteracao_quantidade(df_show):
+    st.markdown(f"**{df_show.shape[0]} empresa(s) com quantidade alterada**")
     st.dataframe(df_show.reset_index(drop=True), use_container_width=True, hide_index=True)
 
 
 @st.fragment
-def pagina_sefaz_comparacao():
+def pagina_sefaz_alteracao_quantidade_notas():
     import plotly.graph_objects as go
     st.empty()
 
-    # ── carrega aba SEFAZ ─────────────────────────────────────────────────────
+    # ── carrega abas SEFAZ INICIAL e SEFAZ FINAL ──────────────────────────────
     try:
         resp = requests.get(GOOGLE_SHEET_URL)
         resp.raise_for_status()
-        df_sefaz = pd.read_excel(
-            BytesIO(resp.content),
-            sheet_name=SHEET_SEFAZ,
-            engine="openpyxl",
-            header=0,
+        conteudo = BytesIO(resp.content)
+        df_inicial = pd.read_excel(
+            conteudo, sheet_name=SHEET_SEFAZ_INICIAL, engine="openpyxl", header=0,
+        )
+        conteudo.seek(0)
+        df_final = pd.read_excel(
+            conteudo, sheet_name=SHEET_SEFAZ_FINAL, engine="openpyxl", header=0,
         )
     except Exception as e:
-        st.error(f"Erro ao ler aba SEFAZ: {e}")
+        st.error(f"Erro ao ler abas SEFAZ INICIAL / SEFAZ FINAL: {e}")
         return
 
-    df_sefaz.columns = df_sefaz.columns.str.strip()
+    df_inicial.columns = df_inicial.columns.str.strip()
+    df_final.columns   = df_final.columns.str.strip()
+
+    st.markdown("<h2>SEFAZ ALTERAÇÃO QUANTIDADE NOTAS</h2>", unsafe_allow_html=True)
+
+    # ── identifica colunas por posição — A=0 (CÓDIGO), E=4 (QUANTIDADE) ───────
+    cols_inicial = df_inicial.columns.tolist()
+    cols_final   = df_final.columns.tolist()
+
+    def _col(cols, idx):
+        return cols[idx] if idx < len(cols) else None
+
+    nome_cod_ini  = _col(cols_inicial, 0)
+    nome_qtd_ini  = _col(cols_inicial, 4)
+    nome_cod_fim  = _col(cols_final, 0)
+    nome_qtd_fim  = _col(cols_final, 4)
+
+    if not all([nome_cod_ini, nome_qtd_ini, nome_cod_fim, nome_qtd_fim]):
+        st.error("Colunas A ou E não encontradas nas abas SEFAZ INICIAL / SEFAZ FINAL.")
+        return
+
+    # ── SEFAZ FINAL sem dados → NÃO DISPONÍVEL ────────────────────────────────
+    if df_final[nome_qtd_fim].notna().sum() == 0:
+        st.markdown(
+            "<div style='text-align:center; padding:60px 20px; background:#fdf2e3; "
+            "border-radius:12px; border-left:6px solid #e67e22;'>"
+            "<span style='font-size:28px; font-weight:700; color:#e67e22;'>NÃO DISPONÍVEL</span><br>"
+            "<span style='font-size:14px; color:#555;'>A aba SEFAZ FINAL ainda não possui dados.</span>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        return
 
     # ── carrega aba GERAL para pegar Nome e CNPJ ──────────────────────────────
     df_geral = le_planilha_google(GOOGLE_SHEET_URL, SHEET_EMPRESAS)
@@ -2741,57 +2776,43 @@ def pagina_sefaz_comparacao():
                 "Insc. Estadual": row.get("Insc. Estadual", ""),
             }
 
-    # ── identifica colunas por posição ───────────────────────────────────────
-    # A=0, D=3, T=19, W=22
-    cols = df_sefaz.columns.tolist()
-
-    def _col(idx):
-        return cols[idx] if idx < len(cols) else None
-
-    nome_cod_a  = _col(0)   # A — CÓDIGO
-    nome_said_d = _col(3)   # D — SAÍDAS
-    nome_cod_t  = _col(19)  # T — CÓDIGO
-    nome_said_w = _col(22)  # W — SAÍDAS
-
-    if not all([nome_cod_a, nome_said_d, nome_cod_t, nome_said_w]):
-        st.error("Colunas A, D, T ou W não encontradas na aba SEFAZ.")
-        return
-
-    # ── normaliza e converte ──────────────────────────────────────────────────
-    # ── normaliza códigos — remove .0 ────────────────────────────────────────
+    # ── normaliza códigos e quantidades ───────────────────────────────────────
     def _limpa_codigo(val):
         s = str(val).strip()
         if s.endswith(".0"):
             s = s[:-2]
         return s.upper().replace("NAN", "").strip()
 
-    df_sefaz[nome_cod_a] = df_sefaz[nome_cod_a].apply(_limpa_codigo)
-    df_sefaz[nome_cod_t] = df_sefaz[nome_cod_t].apply(_limpa_codigo)
-    df_sefaz[nome_said_d] = df_sefaz[nome_said_d].apply(_limpa_numero)
-    df_sefaz[nome_said_w] = df_sefaz[nome_said_w].apply(_limpa_numero)
+    df_inicial[nome_cod_ini] = df_inicial[nome_cod_ini].apply(_limpa_codigo)
+    df_final[nome_cod_fim]   = df_final[nome_cod_fim].apply(_limpa_codigo)
+    df_inicial[nome_qtd_ini] = df_inicial[nome_qtd_ini].apply(_limpa_numero)
+    df_final[nome_qtd_fim]   = df_final[nome_qtd_fim].apply(_limpa_numero)
 
     # ── filtra linhas válidas de cada lado ────────────────────────────────────
-    df_lado_a = df_sefaz[df_sefaz[nome_cod_a] != ""][
-        [nome_cod_a, nome_said_d]
+    df_lado_ini = df_inicial[df_inicial[nome_cod_ini] != ""][
+        [nome_cod_ini, nome_qtd_ini]
     ].copy()
-    df_lado_a.columns = ["Código", "Saídas_A"]
+    df_lado_ini.columns = ["Código", "Qtd_Inicial"]
 
-    df_lado_t = df_sefaz[df_sefaz[nome_cod_t] != ""][
-        [nome_cod_t, nome_said_w]
+    df_lado_fim = df_final[df_final[nome_cod_fim] != ""][
+        [nome_cod_fim, nome_qtd_fim]
     ].copy()
-    df_lado_t.columns = ["Código", "Saídas_T"]
+    df_lado_fim.columns = ["Código", "Qtd_Final"]
 
     # ── agrupa por código (soma caso haja duplicatas) ─────────────────────────
-    df_lado_a = df_lado_a.groupby("Código", as_index=False)["Saídas_A"].sum()
-    df_lado_t = df_lado_t.groupby("Código", as_index=False)["Saídas_T"].sum()
+    df_lado_ini = df_lado_ini.groupby("Código", as_index=False)["Qtd_Inicial"].sum()
+    df_lado_fim = df_lado_fim.groupby("Código", as_index=False)["Qtd_Final"].sum()
 
     # ── junta pelos códigos ───────────────────────────────────────────────────
-    df_merge = pd.merge(df_lado_a, df_lado_t, on="Código", how="outer").fillna(0)
+    df_merge = pd.merge(df_lado_ini, df_lado_fim, on="Código", how="outer").fillna(0)
 
     # ── compara ───────────────────────────────────────────────────────────────
-    df_merge["Diferença"] = df_merge["Saídas_A"] - df_merge["Saídas_T"]
-    df_dif  = df_merge[df_merge["Diferença"] != 0].copy()
-    df_ok   = df_merge[df_merge["Diferença"] == 0].copy()
+    df_merge["Diferença"] = df_merge["Qtd_Final"] - df_merge["Qtd_Inicial"]
+    df_merge["Status"] = df_merge["Diferença"].apply(
+        lambda d: "MESMA QUANTIDADE" if d == 0 else "QUANTIDADE ALTERADA"
+    )
+    df_alterada = df_merge[df_merge["Diferença"] != 0].copy()
+    df_mesma    = df_merge[df_merge["Diferença"] == 0].copy()
 
     # ── monta df de exibição com Nome e CNPJ da GERAL ─────────────────────────
     def _enriquece(df_in):
@@ -2814,38 +2835,38 @@ def pagina_sefaz_comparacao():
                 "Razão Social":    emp.get("Razão Social", ""),
                 "CNPJ":            emp.get("CNPJ", ""),
                 "Insc. Estadual":  emp.get("Insc. Estadual", ""),
-                "Saídas Inicial":  _fmt_valor(row["Saídas_A"]),
-                "Saídas Final":    _fmt_valor(row["Saídas_T"]),
-                "Diferença":       _fmt_valor(row["Diferença"]),
+                "Quantidade Inicial": _fmt_valor(row["Qtd_Inicial"]),
+                "Quantidade Final":   _fmt_valor(row["Qtd_Final"]),
+                "Diferença":          _fmt_valor(row["Diferença"]),
+                "Status":             row["Status"],
             })
         return pd.DataFrame(rows)
 
-    df_result = _enriquece(df_dif)
+    df_result = _enriquece(df_alterada)
 
     total_empresas = len(df_merge)
-    total_dif      = len(df_result)
-    total_ok       = len(df_ok)
+    total_alterada = len(df_result)
+    total_mesma    = len(df_mesma)
 
     # ── cabeçalho ─────────────────────────────────────────────────────────────
-    st.markdown("<h2>SEFAZ COMPARAÇÃO</h2>", unsafe_allow_html=True)
     st.markdown(
         f"<p style='text-align:right; font-size:20px;'>"
-        f"<b>Com divergência:</b> {total_dif} &nbsp;|&nbsp; "
-        f"<b>Sem divergência:</b> {total_ok} &nbsp;|&nbsp; "
+        f"<b>Quantidade alterada:</b> {total_alterada} &nbsp;|&nbsp; "
+        f"<b>Mesma quantidade:</b> {total_mesma} &nbsp;|&nbsp; "
         f"<b>Total:</b> {total_empresas}</p>",
         unsafe_allow_html=True,
     )
 
     # ── donut ─────────────────────────────────────────────────────────────────
-    if "sefaz_comp_key" not in st.session_state:
-        st.session_state["sefaz_comp_key"] = 0
+    if "sefaz_altqtd_key" not in st.session_state:
+        st.session_state["sefaz_altqtd_key"] = 0
 
-    pct_dif = round(total_dif / total_empresas * 100) if total_empresas else 0
-    pct_ok  = round(total_ok  / total_empresas * 100) if total_empresas else 0
+    pct_alterada = round(total_alterada / total_empresas * 100) if total_empresas else 0
+    pct_mesma    = round(total_mesma    / total_empresas * 100) if total_empresas else 0
 
     fig = go.Figure(data=[go.Pie(
-        labels=["Com Divergência", "Sem Divergência"],
-        values=[int(total_dif), int(total_ok)],
+        labels=["Quantidade Alterada", "Mesma Quantidade"],
+        values=[int(total_alterada), int(total_mesma)],
         hole=0.68,
         marker=dict(
             colors=["#c0392b", "#27ae60"],
@@ -2875,7 +2896,7 @@ def pagina_sefaz_comparacao():
         st.plotly_chart(
             fig,
             use_container_width=True,
-            key=f"chart_sefaz_comp_{st.session_state['sefaz_comp_key']}",
+            key=f"chart_sefaz_altqtd_{st.session_state['sefaz_altqtd_key']}",
         )
 
     col_l, col_r = st.columns(2)
@@ -2883,45 +2904,45 @@ def pagina_sefaz_comparacao():
         st.markdown(
             f"<div style='text-align:center; padding:8px; background:#fdedec; "
             f"border-radius:8px; border-left:4px solid #c0392b;'>"
-            f"<span style='font-size:22px; font-weight:700; color:#c0392b;'>{total_dif}</span><br>"
-            f"<span style='font-size:13px; color:#555;'>Com Divergência ({pct_dif}%)</span></div>",
+            f"<span style='font-size:22px; font-weight:700; color:#c0392b;'>{total_alterada}</span><br>"
+            f"<span style='font-size:13px; color:#555;'>Quantidade Alterada ({pct_alterada}%)</span></div>",
             unsafe_allow_html=True,
         )
     with col_r:
         st.markdown(
             f"<div style='text-align:center; padding:8px; background:#eafaf1; "
             f"border-radius:8px; border-left:4px solid #27ae60;'>"
-            f"<span style='font-size:22px; font-weight:700; color:#27ae60;'>{total_ok}</span><br>"
-            f"<span style='font-size:13px; color:#555;'>Sem Divergência ({pct_ok}%)</span></div>",
+            f"<span style='font-size:22px; font-weight:700; color:#27ae60;'>{total_mesma}</span><br>"
+            f"<span style='font-size:13px; color:#555;'>Mesma Quantidade ({pct_mesma}%)</span></div>",
             unsafe_allow_html=True,
         )
 
     st.markdown("<br>", unsafe_allow_html=True)
-    if st.button("Ver empresas com divergência", use_container_width=True,
-                 key="btn_sefaz_comp_dif"):
+    if st.button("Ver empresas com quantidade alterada", use_container_width=True,
+                 key="btn_sefaz_altqtd"):
         if not df_result.empty:
-            _modal_sefaz_comparacao(df_result)
+            _modal_sefaz_alteracao_quantidade(df_result)
         else:
-            st.info("Nenhuma divergência encontrada!")
+            st.info("Nenhuma alteração de quantidade encontrada!")
 
     st.divider()
 
     # ── lista ─────────────────────────────────────────────────────────────────
-    st.markdown("### Lista de Divergências", unsafe_allow_html=True)
+    st.markdown("### Lista de Empresas com Quantidade Alterada", unsafe_allow_html=True)
 
     if not df_result.empty:
         df_exib = _sanitiza_df(df_result)
-        exibe_aggrid(df_exib, height=400, grid_key="grid_sefaz_comp")
+        exibe_aggrid(df_exib, height=400, grid_key="grid_sefaz_altqtd")
 
         output = BytesIO()
         df_result.to_excel(output, index=False)
         st.download_button(
             "Baixar Excel", data=output.getvalue(),
-            file_name="sefaz_comparacao.xlsx",
+            file_name="sefaz_alteracao_quantidade_notas.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
     else:
-        st.success("Nenhuma divergência encontrada entre as colunas!")
+        st.success("Nenhuma alteração de quantidade encontrada entre as abas!")
 
 # ============================================================================
 # COMPARAÇÃO DE IMPOSTOS
@@ -3967,8 +3988,8 @@ with st.session_state.main_container.container():
         pagina_cnd_municipal()
     elif pagina == "SEM ACESSO":
         pagina_sem_acesso()
-    elif pagina == "SEFAZ COMPARAÇÃO":
-        pagina_sefaz_comparacao()
+    elif pagina == "SEFAZ ALTERAÇÃO QUANTIDADE NOTAS":
+        pagina_sefaz_alteracao_quantidade_notas()
     elif pagina == "COMPARAÇÃO DE IMPOSTOS":
         pagina_comparacao_impostos()
     elif pagina == "ALVARÁS":
