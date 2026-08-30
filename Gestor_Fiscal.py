@@ -28,6 +28,7 @@ SHEET_XML_REST = "Leitura Xml REST"
 SHEET_SEFAZ = "SEFAZ"
 SHEET_SEFAZ_INICIAL = "SEFAZ INICIAL"
 SHEET_SEFAZ_FINAL   = "SEFAZ FINAL"
+SHEET_SITUACAO_FISCAL = "SITUAÇÃO FISCAL"
 
 # ============================================================================
 # CSS E ESTILOS
@@ -221,7 +222,7 @@ def tela_menu_principal():
     st.markdown("<h1 style='text-align:center; color:#1d3f77;'>Selecione a Área</h1>", unsafe_allow_html=True)
     st.markdown("<br>", unsafe_allow_html=True)
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
 
     with col1:
         st.markdown('<div class="menu-btn">', unsafe_allow_html=True)
@@ -244,6 +245,14 @@ def tela_menu_principal():
         if st.button("CONTÁBIL", use_container_width=True, key="btn_contabil"):
             st.session_state["menu_area"] = "CONTÁBIL"
             st.session_state["pagina_atual"] = "EMPRESAS"
+            st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with col4:
+        st.markdown('<div class="menu-btn">', unsafe_allow_html=True)
+        if st.button("SITUAÇÃO FISCAL", use_container_width=True, key="btn_situacao_fiscal"):
+            st.session_state["menu_area"] = "SITUAÇÃO FISCAL"
+            st.session_state["pagina_atual"] = "DASHBOARD"
             st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -308,7 +317,7 @@ st.sidebar.markdown("""
 """, unsafe_allow_html=True)
 
 # Exibe a área atual e botão de voltar
-label_area = {"FISCAL": "FISCAL", "PARALEGAL": "DEPARTAMENTO PARALEGAL", "CONTÁBIL": "CONTÁBIL"}
+label_area = {"FISCAL": "FISCAL", "PARALEGAL": "DEPARTAMENTO PARALEGAL", "CONTÁBIL": "CONTÁBIL", "SITUAÇÃO FISCAL": "SITUAÇÃO FISCAL"}
 st.sidebar.markdown(f"<p style='text-align:center; color:#1d3f77; font-weight:bold; margin-top:10px;'>{label_area.get(st.session_state['menu_area'], st.session_state['menu_area'])}</p>", unsafe_allow_html=True)
 
 if st.sidebar.button("← DEPARTAMENTOS", use_container_width=True):
@@ -329,6 +338,9 @@ elif st.session_state["menu_area"] == "PARALEGAL":
 
 elif st.session_state["menu_area"] == "CONTÁBIL":
     paginas_disponiveis = ["EMPRESAS", "OPTANTE SIMPLES", "RECEITA X DESPESA"]
+
+elif st.session_state["menu_area"] == "SITUAÇÃO FISCAL":
+    paginas_disponiveis = ["DASHBOARD", "EMPRESAS", "CAIXA POSTAL"]
 
 else:
     paginas_disponiveis = ["EMPRESAS"]
@@ -569,6 +581,503 @@ def pagina_simples():
         "Baixar Excel", data=output.getvalue(),
         file_name="simples_nacional.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+def _limpa_codigo_sf(val):
+    """Normaliza a coluna Código para casar linhas entre os blocos A-D e F+ da
+    aba SITUAÇÃO FISCAL (mesmo padrão de _limpa_codigo usado em pagina_sefaz_comparacao)."""
+    s = str(val).strip()
+    if s.endswith(".0"):
+        s = s[:-2]
+    return s.upper().replace("NAN", "").strip()
+
+
+def _extrai_mensagens_caixa_postal(valor):
+    """Uma célula de CAIXA POSTAL pode trazer mais de um arquivo, separados por
+    ' | ' (ex: '_461_Painel de Conformidade...png | _461_Opção pelo Simples...').
+    Retorna a lista de assuntos já limpos, sem o prefixo _<código>_ nem a extensão."""
+    import re
+    if pd.isna(valor) or not str(valor).strip():
+        return []
+    assuntos = []
+    for parte in str(valor).split("|"):
+        assunto = re.sub(r"^_\d+_", "", parte.strip())
+        assunto = re.sub(r"\.(png|pdf|jpe?g)$", "", assunto, flags=re.IGNORECASE).strip()
+        # agrupa variações numeradas (ex: "Intimação nº 19986101") num único assunto,
+        # senão cada número vira um botão de filtro diferente
+        assunto = re.sub(r"\s*n[ºo°]\s*\d+\s*$", "", assunto, flags=re.IGNORECASE).strip()
+        if assunto:
+            assuntos.append(assunto)
+    return assuntos
+
+
+@st.dialog("SITUAÇÃO FISCAL — Não Concluídas")
+def _modal_sf_nao_concluidas(df_show):
+    st.markdown(f"**{df_show.shape[0]} empresa(s) não concluída(s)**")
+    cols = [c for c in ["Código", "Razão Social", "CNPJ", "Status", "Detalhe"] if c in df_show.columns]
+    df_exib = df_show[cols].copy()
+    st.dataframe(df_exib.reset_index(drop=True), use_container_width=True, hide_index=True)
+
+
+def _carrega_situacao_fiscal():
+    """Lê a aba SITUAÇÃO FISCAL e faz o PROCV entre o bloco de empresas (A-D) e
+    o bloco de leitura (F em diante, K/ARQUIVO fora) pelo Código — as duas partes
+    não pertencem às mesmas linhas na planilha. Compartilhado pelas páginas
+    DASHBOARD e EMPRESAS do departamento SITUAÇÃO FISCAL para não duplicar a
+    lógica de junção. Retorna (df_merge, mes_leitura, cols_situacoes); em caso de
+    erro retorna (None, "", [])."""
+    df_sf = le_planilha_google(GOOGLE_SHEET_URL, SHEET_SITUACAO_FISCAL)
+    if df_sf is None:
+        return None, "", []
+
+    cols_sf = df_sf.columns.tolist()
+    if len(cols_sf) < 20:
+        st.error("Estrutura da aba SITUAÇÃO FISCAL inesperada (menos de 20 colunas).")
+        return None, "", []
+
+    # ── posições fixas na aba: A-D = empresas, F-L = leitura (K oculta), ───────
+    # ── M-T = Caixa Postal (menu separado), U em diante = situações ───────────
+    col_cod_base, col_razao, col_regime, col_rodou = cols_sf[0], cols_sf[1], cols_sf[2], cols_sf[3]
+    col_codigo, col_cnpj, col_mes, col_status, col_detalhe = (
+        cols_sf[5], cols_sf[6], cols_sf[7], cols_sf[8], cols_sf[9]
+    )
+    # cols_sf[10] = ARQUIVO (K) — não exibir
+    col_data_hora = cols_sf[11]
+    cols_situacoes = cols_sf[20:]  # U em diante
+
+    df_base = df_sf[[col_cod_base, col_razao, col_regime, col_rodou]].copy()
+    df_base.columns = ["Código", "Razão Social", "Regime", "Rodou"]
+    df_base = df_base[df_base["Código"].notna()].copy()
+    df_base["Código"] = df_base["Código"].apply(_limpa_codigo_sf)
+
+    if df_base.empty:
+        st.warning("Nenhuma empresa encontrada na aba SITUAÇÃO FISCAL.")
+        return None, "", []
+
+    df_leitura = df_sf[[col_codigo, col_cnpj, col_mes, col_status, col_detalhe, col_data_hora]
+                        + cols_situacoes].copy()
+    df_leitura = df_leitura[df_leitura[col_codigo].notna()].copy()
+    df_leitura[col_codigo] = df_leitura[col_codigo].apply(_limpa_codigo_sf)
+    df_leitura.rename(columns={
+        col_codigo: "Código", col_cnpj: "CNPJ", col_mes: "Mês Leitura",
+        col_status: "Status", col_detalhe: "Detalhe", col_data_hora: "Data/Hora",
+    }, inplace=True)
+
+    mes_validos = df_leitura["Mês Leitura"].dropna()
+    mes_leitura = pd.to_datetime(mes_validos.iloc[0], errors="coerce").strftime("%m/%Y") \
+        if not mes_validos.empty else ""
+
+    # ── PROCV: junta a leitura (colunas F em diante) às empresas (A-D) pelo Código ──
+    df_merge = pd.merge(df_base, df_leitura, on="Código", how="left")
+
+    if "CNPJ" in df_merge.columns:
+        df_merge["CNPJ"] = df_merge["CNPJ"].apply(_formata_cnpj_mascara)
+
+    def _classifica(val):
+        v = str(val).strip().upper() if pd.notna(val) and str(val).strip() not in ("", "NAN") else ""
+        return "Concluída" if "BAIXADO" in v else "Não Concluída"
+
+    df_merge["Situação Leitura"] = df_merge["Rodou"].apply(_classifica)
+
+    return df_merge, mes_leitura, cols_situacoes
+
+
+def pagina_situacao_fiscal_dashboard():
+    import plotly.graph_objects as go
+    st.empty()
+
+    df_merge, mes_leitura, _ = _carrega_situacao_fiscal()
+    if df_merge is None:
+        return
+
+    concluidas     = (df_merge["Situação Leitura"] == "Concluída").sum()
+    nao_concluidas = (df_merge["Situação Leitura"] == "Não Concluída").sum()
+    total          = concluidas + nao_concluidas
+
+    st.markdown("<h2>SITUAÇÃO FISCAL — DASHBOARD</h2>", unsafe_allow_html=True)
+    st.markdown(
+        f"<p style='text-align:right; font-size:20px;'>"
+        f"<b>Concluídas:</b> {concluidas} &nbsp;|&nbsp; "
+        f"<b>Não concluídas:</b> {nao_concluidas} &nbsp;|&nbsp; "
+        f"<b>Mês de Leitura:</b> {mes_leitura}</p>",
+        unsafe_allow_html=True,
+    )
+
+    # ── donut (mesmo padrão do menu SIMPLES NACIONAL) ──────────────────────────
+    if "sf_chart_key" not in st.session_state:
+        st.session_state["sf_chart_key"] = 0
+
+    pct_c  = round(concluidas     / total * 100) if total else 0
+    pct_nc = round(nao_concluidas / total * 100) if total else 0
+
+    fig = go.Figure(data=[go.Pie(
+        labels=["Concluídas", "Não Concluídas"],
+        values=[int(concluidas), int(nao_concluidas)],
+        hole=0.68,
+        marker=dict(
+            colors=["#27ae60", "#e74c3c"],
+            line=dict(color="#ffffff", width=3),
+        ),
+        textinfo="none",
+        hovertemplate="<b>%{label}</b><br>%{value} empresa(s) — %{percent}<extra></extra>",
+        direction="clockwise",
+        sort=False,
+    )])
+
+    fig.update_layout(
+        paper_bgcolor="white", plot_bgcolor="white",
+        showlegend=False,
+        margin=dict(t=20, b=20, l=20, r=20),
+        height=300,
+        annotations=[dict(
+            text=f"<b>{total}</b><br><span style='font-size:11px'>empresas</span>",
+            x=0.5, y=0.5,
+            xanchor="center", yanchor="middle",
+            showarrow=False,
+            font=dict(size=22, color="#1d3f77"),
+        )],
+    )
+
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        key=f"chart_sf_{st.session_state['sf_chart_key']}",
+    )
+
+    col_l, col_r = st.columns(2)
+    with col_l:
+        st.markdown(
+            f"<div style='text-align:center; padding:8px; background:#f0faf4; "
+            f"border-radius:8px; border-left:4px solid #27ae60;'>"
+            f"<span style='font-size:22px; font-weight:700; color:#27ae60;'>{concluidas}</span><br>"
+            f"<span style='font-size:13px; color:#555;'>Concluídas ({pct_c}%)</span></div>",
+            unsafe_allow_html=True,
+        )
+    with col_r:
+        st.markdown(
+            f"<div style='text-align:center; padding:8px; background:#fdf2f2; "
+            f"border-radius:8px; border-left:4px solid #e74c3c;'>"
+            f"<span style='font-size:22px; font-weight:700; color:#e74c3c;'>{nao_concluidas}</span><br>"
+            f"<span style='font-size:13px; color:#555;'>Não Concluídas ({pct_nc}%)</span></div>",
+            unsafe_allow_html=True,
+        )
+        if st.button("Ver empresas não concluídas", use_container_width=True,
+                     key="btn_sf_nao_concluidas"):
+            df_nc = df_merge[df_merge["Situação Leitura"] == "Não Concluída"]
+            _modal_sf_nao_concluidas(df_nc)
+
+
+# Apps Script (só leitura no Drive, não grava em nada) que devolve o link do
+# PDF mais recente de SITUAÇÃO FISCAL de cada empresa, casando pelo Código
+# embutido no nome do arquivo ("_<código>_SITUAÇÃO FISCAL MM-AAAA.pdf").
+# COMPARTILHADO entre todos os escritórios (ver apps_script_pdf_situacao_fiscal.gs
+# guardado na pasta ASBEM) - a URL só funciona de fato depois que o script
+# compartilhado for republicado com a pasta do Drive da VIDAL cadastrada em
+# PASTAS_POR_ESCRITORIO; até lá a lupa simplesmente não aparece na tabela, a
+# página não quebra.
+APPS_SCRIPT_PDF_SITUACAO_FISCAL_URL = "https://script.google.com/macros/s/AKfycbz7FnVmU0-39_HszitoisrnNZ60fNpVVSXH55m3ufxoPmWEzj5uEy6Gsx9G87WiesXi/exec?escritorio=vidal"
+
+
+@st.cache_data(ttl=600)
+def _busca_links_pdf_situacao_fiscal():
+    """Busca no Apps Script {código: link do PDF} de SITUAÇÃO FISCAL. Retorna {}
+    (silenciosamente) se a URL não estiver configurada ou a chamada falhar."""
+    if not APPS_SCRIPT_PDF_SITUACAO_FISCAL_URL:
+        return {}
+    try:
+        resp = requests.get(APPS_SCRIPT_PDF_SITUACAO_FISCAL_URL, timeout=20)
+        resp.raise_for_status()
+        dados = resp.json()
+        return {str(k).strip(): str(v).strip() for k, v in dados.items()}
+    except Exception:
+        return {}
+
+
+def pagina_situacao_fiscal_empresas():
+    st.empty()
+
+    df_merge, mes_leitura, cols_situacoes = _carrega_situacao_fiscal()
+    if df_merge is None:
+        return
+
+    st.markdown("<h2>SITUAÇÃO FISCAL — EMPRESAS</h2>", unsafe_allow_html=True)
+    st.markdown(
+        f"<p style='text-align:right; font-size:16px;'>"
+        f"<b>Empresas:</b> {len(df_merge)} &nbsp;|&nbsp; "
+        f"<b>Mês de Leitura:</b> {mes_leitura}</p>",
+        unsafe_allow_html=True,
+    )
+
+    # ── cores dos filtros (botões e listas) ─────────────────────────────────────
+    CATEGORIAS_COR = {
+        "OMISSÕES":      ("sf_cat_omissoes",      "#e67e22"),
+        "PARCELAMENTOS": ("sf_cat_parcelamentos", "#2e86de"),
+        "DÉBITOS":       ("sf_cat_debitos",        "#e74c3c"),
+        "DEMAIS":        ("sf_cat_demais",         "#7f8c8d"),
+    }
+    regras_css = [
+        # botões "Concluída"/"Não Concluída" — 1º verde, 2º vermelho
+        ".st-key-sf_box_status div[data-testid='stButtonGroup'] [role='radio']:nth-of-type(1),"
+        ".st-key-sf_box_status div[data-testid='stButtonGroup'] label:nth-of-type(1) {"
+        " border-color:#27ae60 !important; color:#27ae60 !important; }",
+        ".st-key-sf_box_status div[data-testid='stButtonGroup'] [role='radio']:nth-of-type(1)[aria-checked='true'],"
+        ".st-key-sf_box_status div[data-testid='stButtonGroup'] label:nth-of-type(1)[aria-checked='true'] {"
+        " background-color:#27ae60 !important; color:#fff !important; }",
+        ".st-key-sf_box_status div[data-testid='stButtonGroup'] [role='radio']:nth-of-type(2),"
+        ".st-key-sf_box_status div[data-testid='stButtonGroup'] label:nth-of-type(2) {"
+        " border-color:#e74c3c !important; color:#e74c3c !important; }",
+        ".st-key-sf_box_status div[data-testid='stButtonGroup'] [role='radio']:nth-of-type(2)[aria-checked='true'],"
+        ".st-key-sf_box_status div[data-testid='stButtonGroup'] label:nth-of-type(2)[aria-checked='true'] {"
+        " background-color:#e74c3c !important; color:#fff !important; }",
+    ]
+    for nome_cat, (key_cat, cor) in CATEGORIAS_COR.items():
+        regras_css.append(
+            f".st-key-{key_cat} {{ border-top:3px solid {cor} !important; border-radius:8px; padding:6px 8px 2px 8px; }}"
+        )
+        regras_css.append(
+            f".st-key-{key_cat} span[data-baseweb='tag'] {{ background-color:{cor} !important; }}"
+        )
+    st.markdown(f"<style>{''.join(regras_css)}</style>", unsafe_allow_html=True)
+
+    # ── filtros em botões (pills) — em vez de uma coluna por situação ──────────
+    st.markdown("<p style='margin-bottom:2px;'><b>Status da leitura</b></p>", unsafe_allow_html=True)
+    with st.container(key="sf_box_status"):
+        status_sel = st.pills(
+            "Status da leitura", ["Concluída", "Não Concluída"],
+            selection_mode="single", label_visibility="collapsed", key="sf_pill_status",
+        )
+
+    contagens = {c: int((df_merge[c].astype(str).str.strip().str.upper() == "X").sum())
+                 for c in cols_situacoes}
+
+    # ── situações fiscais em 4 listas (tipo validação de dados), em vez de ────
+    # ── um botão para cada uma das 31 colunas ──────────────────────────────────
+    categorias = {"OMISSÕES": [], "PARCELAMENTOS": [], "DÉBITOS": [], "DEMAIS": []}
+    for c in cols_situacoes:
+        up = c.upper()
+        if up.startswith("OMISSÃO"):
+            categorias["OMISSÕES"].append(c)
+        elif up.startswith("PARCELAMENTO"):
+            categorias["PARCELAMENTOS"].append(c)
+        elif up.startswith("DÉBITO"):
+            categorias["DÉBITOS"].append(c)
+        else:
+            categorias["DEMAIS"].append(c)
+
+    situacoes_sel = []
+    cols_categorias = st.columns(4)
+    for col_widget, (nome_cat, itens) in zip(cols_categorias, categorias.items()):
+        with col_widget:
+            key_cat, _ = CATEGORIAS_COR[nome_cat]
+            with st.container(key=key_cat):
+                opcoes = sorted((c for c in itens if contagens[c] > 0),
+                                 key=lambda c: contagens[c], reverse=True)
+                sel = st.multiselect(
+                    nome_cat, opcoes,
+                    format_func=lambda c: f"{c} ({contagens[c]})",
+                    key=f"sf_ms_{nome_cat}",
+                )
+                situacoes_sel.extend(sel)
+
+    df_filtrado = df_merge
+    if status_sel:
+        df_filtrado = df_filtrado[df_filtrado["Situação Leitura"] == status_sel]
+    if situacoes_sel:
+        mask = pd.Series(False, index=df_filtrado.index)
+        for c in situacoes_sel:
+            mask |= df_filtrado[c].astype(str).str.strip().str.upper() == "X"
+        df_filtrado = df_filtrado[mask]
+
+    # ── resume as situações marcadas de cada empresa numa única coluna ────────
+    def _resume_situacoes(row):
+        marcadas = [c for c in cols_situacoes if str(row.get(c, "")).strip().upper() == "X"]
+        return " · ".join(marcadas)
+
+    df_filtrado = df_filtrado.copy()
+    df_filtrado["Situações"] = df_filtrado.apply(_resume_situacoes, axis=1)
+
+    st.divider()
+    st.caption(f"{len(df_filtrado)} empresa(s) exibida(s)")
+
+    colunas_exibir = ["Código", "Razão Social", "Regime", "CNPJ", "Mês Leitura",
+                       "Status", "Data/Hora", "Situação Leitura", "Situações"]
+    colunas_exibir = [c for c in colunas_exibir if c in df_filtrado.columns]
+    df_tabela = _sanitiza_df(df_filtrado[colunas_exibir])
+
+    # ── lupa por empresa: PDF vem de uma pasta do Drive (sistema roda na nuvem do
+    # ── Streamlit, sem acesso a disco/rede local — só dá pra abrir arquivo por URL) ──
+    links_pdf = _busca_links_pdf_situacao_fiscal()
+    df_tabela["PDF"] = df_tabela["Código"].map(links_pdf).fillna("") if links_pdf else ""
+
+    # ── a chave do grid muda conforme o filtro — o AgGrid usa reload_data=False,
+    # ── então com uma chave fixa ele ignora dado novo e mantém a lista antiga ──
+    filtro_estado = "|".join([status_sel or "todos"] + sorted(situacoes_sel))
+    grid_key = f"grid_situacao_fiscal_{abs(hash(filtro_estado))}"
+
+    gb = GridOptionsBuilder.from_dataframe(df_tabela)
+    gb.configure_default_column(filter=True, sortable=True, editable=False, resizable=True)
+    for col in df_tabela.columns:
+        if col == "PDF":
+            continue
+        gb.configure_column(col, filter="agTextColumnFilter")
+
+    # cellRenderer baseado em CLASSE (init/getGui), não em função que retorna string:
+    # o streamlit-aggrid usa ag-grid-react por baixo, e uma função que só devolve uma
+    # string HTML é escapada como texto puro pelo React (apareceu literalmente "<a
+    # href=..." cortado pela coluna estreita). Setando innerHTML manualmente dentro de
+    # init() contorna esse escape.
+    from st_aggrid import JsCode
+    lupa_renderer = JsCode("""
+        class LupaPdfRenderer {
+            init(params) {
+                this.eGui = document.createElement('span');
+                if (params.value) {
+                    this.eGui.innerHTML =
+                        '<a href="' + params.value + '" target="_blank" rel="noopener" ' +
+                        'style="font-size:18px; text-decoration:none;" title="Abrir PDF">🔎</a>';
+                }
+            }
+            getGui() { return this.eGui; }
+            refresh(params) { return false; }
+        }
+    """)
+    gb.configure_column("PDF", header_name="", cellRenderer=lupa_renderer,
+                         filter=False, sortable=False, resizable=False,
+                         suppressSizeToFit=True, width=56, pinned="left",
+                         cellStyle={"textAlign": "center"})
+
+    gb.configure_grid_options(
+        domLayout="normal", floatingFilter=True, headerHeight=40, rowHeight=30,
+        enableBrowserTooltips=True, enableCellTextSelection=True, suppressMenuHide=True,
+        localeText={
+            'filterOoo': 'Filtrar...', 'contains': 'Contém', 'notContains': 'Não contém',
+            'equals': 'Igual', 'notEqual': 'Diferente', 'blank': 'Em branco',
+            'notBlank': 'Não em branco', 'noRowsToShow': 'Nenhum registro para mostrar',
+        }
+    )
+    AgGrid(df_tabela, gridOptions=gb.build(), height=450, key=grid_key,
+           fit_columns_on_grid_load=True, enable_enterprise_modules=False,
+           allow_unsafe_jscode=True, reload_data=False)
+
+    if not links_pdf:
+        st.caption("🔎 Lupa de PDF ainda não configurada — falta publicar "
+                   "apps_script_pdf_situacao_fiscal.gs e preencher "
+                   "APPS_SCRIPT_PDF_SITUACAO_FISCAL_URL.")
+
+    output = BytesIO()
+    df_tabela.to_excel(output, index=False)
+    st.download_button(
+        "Baixar Excel", data=output.getvalue(),
+        file_name="situacao_fiscal.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="btn_download_situacao_fiscal",
+    )
+
+
+def pagina_caixa_postal():
+    from collections import Counter
+    st.empty()
+
+    df_sf = le_planilha_google(GOOGLE_SHEET_URL, SHEET_SITUACAO_FISCAL)
+    if df_sf is None:
+        return
+
+    cols_sf = df_sf.columns.tolist()
+    if len(cols_sf) < 20:
+        st.error("Estrutura da aba SITUAÇÃO FISCAL inesperada (menos de 20 colunas).")
+        return
+
+    col_cod_base, col_razao = cols_sf[0], cols_sf[1]
+    col_codigo, col_cnpj = cols_sf[5], cols_sf[6]
+    cols_caixa_postal = cols_sf[12:20]  # M a T
+
+    df_base = df_sf[[col_cod_base, col_razao]].copy()
+    df_base.columns = ["Código", "Razão Social"]
+    df_base = df_base[df_base["Código"].notna()].copy()
+    df_base["Código"] = df_base["Código"].apply(_limpa_codigo_sf)
+
+    if df_base.empty:
+        st.warning("Nenhuma empresa encontrada na aba SITUAÇÃO FISCAL.")
+        return
+
+    df_cp = df_sf[[col_codigo, col_cnpj] + cols_caixa_postal].copy()
+    df_cp = df_cp[df_cp[col_codigo].notna()].copy()
+    df_cp[col_codigo] = df_cp[col_codigo].apply(_limpa_codigo_sf)
+    df_cp.rename(columns={col_codigo: "Código", col_cnpj: "CNPJ"}, inplace=True)
+
+    df_merge = pd.merge(df_base, df_cp, on="Código", how="left")
+    if "CNPJ" in df_merge.columns:
+        df_merge["CNPJ"] = df_merge["CNPJ"].apply(_formata_cnpj_mascara)
+
+    # ── extrai as mensagens de cada empresa a partir das 8 colunas CAIXA POSTAL ──
+    def _mensagens_da_linha(row):
+        assuntos = []
+        for c in cols_caixa_postal:
+            assuntos.extend(_extrai_mensagens_caixa_postal(row.get(c)))
+        return assuntos
+
+    df_merge["_mensagens"] = df_merge.apply(_mensagens_da_linha, axis=1)
+    df_merge["Qtd. Mensagens"] = df_merge["_mensagens"].apply(len)
+    df_merge["Mensagens"] = df_merge["_mensagens"].apply(lambda lst: " · ".join(lst))
+
+    st.markdown("<h2>CAIXA POSTAL</h2>", unsafe_allow_html=True)
+    st.markdown(
+        f"<p style='text-align:right; font-size:16px;'><b>Empresas:</b> {len(df_merge)}</p>",
+        unsafe_allow_html=True,
+    )
+
+    # ── filtro em botão — assunto da mensagem, um botão por assunto (seleção ──
+    # ── única: marcar um desmarca automaticamente o anterior) ──────────────────
+    st.markdown(
+        "<style>"
+        ".st-key-cp_box_assunto div[data-testid='stButtonGroup'] [role='radio'],"
+        ".st-key-cp_box_assunto div[data-testid='stButtonGroup'] label {"
+        " border-color:#16a085 !important; color:#16a085 !important; }"
+        ".st-key-cp_box_assunto div[data-testid='stButtonGroup'] [role='radio'][aria-checked='true'],"
+        ".st-key-cp_box_assunto div[data-testid='stButtonGroup'] label[aria-checked='true'] {"
+        " background-color:#16a085 !important; color:#fff !important; }"
+        "</style>",
+        unsafe_allow_html=True,
+    )
+
+    contagem_assuntos = Counter(a for lst in df_merge["_mensagens"] for a in lst)
+    opcoes_assunto = sorted(contagem_assuntos, key=contagem_assuntos.get, reverse=True)
+
+    if opcoes_assunto:
+        st.markdown("<p style='margin-bottom:2px;'><b>Assunto da mensagem</b></p>", unsafe_allow_html=True)
+        with st.container(key="cp_box_assunto"):
+            assunto_sel = st.pills(
+                "Assunto da mensagem", opcoes_assunto,
+                selection_mode="single", label_visibility="collapsed",
+                format_func=lambda a: f"{a} ({contagem_assuntos[a]})", key="cp_pill_assunto",
+            )
+    else:
+        assunto_sel = None
+        st.caption("Nenhuma mensagem encontrada na Caixa Postal ainda.")
+
+    df_filtrado = df_merge
+    if assunto_sel:
+        df_filtrado = df_filtrado[df_filtrado["_mensagens"].apply(lambda lst: assunto_sel in lst)]
+
+    st.divider()
+    st.caption(f"{len(df_filtrado)} empresa(s) exibida(s)")
+
+    colunas_exibir = ["Código", "Razão Social", "CNPJ", "Qtd. Mensagens", "Mensagens"]
+    df_tabela = _sanitiza_df(df_filtrado[colunas_exibir])
+
+    # ── a chave do grid muda conforme o filtro — o AgGrid usa reload_data=False,
+    # ── então com uma chave fixa ele ignora dado novo e mantém a lista antiga ──
+    grid_key = f"grid_caixa_postal_{abs(hash(assunto_sel or 'todos'))}"
+    exibe_aggrid(df_tabela, height=450, grid_key=grid_key)
+
+    output = BytesIO()
+    df_tabela.to_excel(output, index=False)
+    st.download_button(
+        "Baixar Excel", data=output.getvalue(),
+        file_name="caixa_postal.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="btn_download_caixa_postal",
     )
 
 
@@ -3964,7 +4473,13 @@ def pagina_alvaras():
 # ============================================================================
 
 with st.session_state.main_container.container():
-    if pagina == "DASHBOARD":
+    if st.session_state["menu_area"] == "SITUAÇÃO FISCAL" and pagina == "DASHBOARD":
+        pagina_situacao_fiscal_dashboard()
+    elif st.session_state["menu_area"] == "SITUAÇÃO FISCAL" and pagina == "EMPRESAS":
+        pagina_situacao_fiscal_empresas()
+    elif st.session_state["menu_area"] == "SITUAÇÃO FISCAL" and pagina == "CAIXA POSTAL":
+        pagina_caixa_postal()
+    elif pagina == "DASHBOARD":
         pagina_dashboard_paralegal()
     elif pagina == "EMPRESAS":
         pagina_empresas()
