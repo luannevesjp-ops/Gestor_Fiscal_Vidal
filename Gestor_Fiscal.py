@@ -5,12 +5,15 @@
 
 import streamlit as st
 import pandas as pd
-from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, ColumnsAutoSizeMode
+from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, ColumnsAutoSizeMode, DataReturnMode
 from io import BytesIO
 import requests
 import time
 import os
 import base64
+import json
+from pathlib import Path
+from datetime import date
 
 # ============================================================================
 # CONFIGURAÇÕES INICIAIS
@@ -29,6 +32,11 @@ SHEET_SEFAZ = "SEFAZ"
 SHEET_SEFAZ_INICIAL = "SEFAZ INICIAL"
 SHEET_SEFAZ_FINAL   = "SEFAZ FINAL"
 SHEET_SITUACAO_FISCAL = "SITUAÇÃO FISCAL"
+SHEET_CERT_ABA   = "CERTIFICADOS"
+SHEET_EMAIL_ABA  = "EMAIL"
+SHEET_MSG_ABA    = "MENSAGEM"
+
+CERT_DATA_FILE = Path(os.path.abspath(__file__)).parent / "cert_data.json"
 
 # ============================================================================
 # CSS E ESTILOS
@@ -107,7 +115,10 @@ def le_planilha_google(url: str, aba: str):
         return None
 
 
-def exibe_aggrid(df, height=400, grid_key="grid", selection_mode='none'):
+def exibe_aggrid(df, height=400, grid_key="grid", selection_mode='none', retorna_filtrado=False):
+    # retorna_filtrado=True: a grade avisa o Python a cada filtro/ordenação feito
+    # nas colunas, e o .data do retorno passa a trazer só as linhas visíveis
+    # (usado pra exportar pro Excel exatamente o que está filtrado na tela).
     gb = GridOptionsBuilder.from_dataframe(df)
     gb.configure_default_column(filter=True, sortable=True, editable=False, resizable=True,
                                  minWidth=110, wrapHeaderText=True, autoHeaderHeight=True)
@@ -133,10 +144,14 @@ def exibe_aggrid(df, height=400, grid_key="grid", selection_mode='none'):
 
     grid_options = gb.build()
     update_on = ['selectionChanged'] if selection_mode != 'none' else []
+    if retorna_filtrado:
+        update_on += ['filterChanged', 'sortChanged']
 
     return AgGrid(df, gridOptions=grid_options, height=height, key=grid_key,
                   columns_auto_size_mode=ColumnsAutoSizeMode.FIT_CONTENTS,
                   enable_enterprise_modules=False,
+                  data_return_mode=(DataReturnMode.FILTERED_AND_SORTED if retorna_filtrado
+                                    else DataReturnMode.AS_INPUT),
                   update_on=update_on, allow_unsafe_jscode=True, reload_data=False)
 
 
@@ -172,6 +187,819 @@ def exibe_aggrid_com_oculta(df, height=400, grid_key="grid", selection_mode='non
                   columns_auto_size_mode=ColumnsAutoSizeMode.FIT_CONTENTS,
                   enable_enterprise_modules=False,
                   update_on=update_on, allow_unsafe_jscode=True, reload_data=False)
+
+# ============================================================================
+# CERTIFICADO DIGITAL — PERSISTÊNCIA, LEITURA E ENVIO DE EMAIL
+# ============================================================================
+
+_MSG_PADRAO = {
+    "vencendo": (
+        "Prezado(a),\n\n"
+        "Informamos que o certificado digital de {razao_social} (CNPJ: {cnpj}) "
+        "vence em {dias} dia(s), no dia {validade}.\n\n"
+        "Por favor, providencie a renovação com urgência.\n\n"
+        "Atenciosamente,\nDepartamento Fiscal"
+    ),
+    "vencido": (
+        "Prezado(a),\n\n"
+        "Informamos que o certificado digital de {razao_social} (CNPJ: {cnpj}) "
+        "venceu em {validade}.\n\n"
+        "Por favor, providencie a renovação imediatamente.\n\n"
+        "Atenciosamente,\nDepartamento Fiscal"
+    ),
+}
+
+_COLS_CERT  = ["arquivo", "nome_arquivo", "senha", "razao_social", "cnpj", "validade", "validade_iso"]
+_COLS_EMAIL = ["cnpj", "emails"]
+_COLS_MSG   = ["tipo", "mensagem"]
+
+# URL do Apps Script publicado como Web App na planilha Google
+# Apps Script PRÓPRIO do VIDAL (bound à planilha do VIDAL, ver
+# apps_script_certificado_digital.gs nesta pasta) — AINDA NÃO PUBLICADO.
+# Enquanto estiver vazio, os certificados só ficam na sessão/cert_data.json
+# local e NÃO são gravados na planilha. NUNCA colar aqui a URL de outro
+# escritório (os dados iriam pra planilha errada).
+APPS_SCRIPT_URL = ""
+
+
+def _cert_carregar_dados():
+    # ── Cache de sessão (evita re-download na mesma sessão) ───────────────────
+    if "cert_dados" in st.session_state:
+        return st.session_state["cert_dados"]
+
+    # ── Leitura direta da planilha Google (abas CERTIFICADOS/EMAIL/MENSAGEM) ──
+    try:
+        resp = requests.get(GOOGLE_SHEET_URL, timeout=20)
+        resp.raise_for_status()
+        xls = resp.content
+
+        try:
+            df = pd.read_excel(BytesIO(xls), sheet_name=SHEET_CERT_ABA, engine="openpyxl")
+            df.columns = df.columns.str.strip()
+            certificados = []
+            for r in df.to_dict("records"):
+                if not any(str(v).strip() for v in r.values()):
+                    continue
+                c = {k: str(v) if v is not None else "" for k, v in r.items()}
+                # Normaliza validade_iso: 'YYYY-MM-DD HH:MM:SS' → 'YYYY-MM-DD'
+                vi = c.get("validade_iso", "").strip()
+                if len(vi) > 10:
+                    vi = vi[:10]
+                c["validade_iso"] = vi
+                # Normaliza validade: se vier como 'YYYY-MM-DD...' converte para 'DD/MM/YYYY'
+                v = c.get("validade", "").strip()
+                if len(v) >= 10 and v[4:5] == "-":
+                    try:
+                        from datetime import datetime as _dt
+                        v = _dt.strptime(v[:10], "%Y-%m-%d").strftime("%d/%m/%Y")
+                    except Exception:
+                        pass
+                c["validade"] = v
+                certificados.append(c)
+        except Exception:
+            certificados = []
+
+        try:
+            df = pd.read_excel(BytesIO(xls), sheet_name=SHEET_EMAIL_ABA, engine="openpyxl")
+            df.columns = df.columns.str.strip()
+            emails = {}
+            for _, row in df.iterrows():
+                cnpj = str(row.get("cnpj", "")).strip()
+                lista = [e.strip() for e in str(row.get("emails", "")).split(";") if e.strip()]
+                if cnpj and lista:
+                    emails[cnpj] = lista
+        except Exception:
+            emails = {}
+
+        try:
+            df = pd.read_excel(BytesIO(xls), sheet_name=SHEET_MSG_ABA, engine="openpyxl")
+            df.columns = df.columns.str.strip()
+            mensagens = dict(_MSG_PADRAO)
+            for _, row in df.iterrows():
+                tipo = str(row.get("tipo", "")).strip()
+                msg  = str(row.get("mensagem", "")).strip()
+                if tipo and msg:
+                    mensagens[tipo] = msg
+        except Exception:
+            mensagens = dict(_MSG_PADRAO)
+
+        dados = {"certificados": certificados, "emails": emails, "mensagens": mensagens}
+        st.session_state["cert_dados"] = dados
+        return dados
+
+    except Exception:
+        pass
+
+    # ── Fallback: JSON local ──────────────────────────────────────────────────
+    if CERT_DATA_FILE.exists():
+        try:
+            dados = json.loads(CERT_DATA_FILE.read_text(encoding="utf-8"))
+            st.session_state["cert_dados"] = dados
+            return dados
+        except Exception:
+            pass
+
+    return {"certificados": [], "emails": {}, "mensagens": dict(_MSG_PADRAO)}
+
+
+def _cert_salvar_dados(data):
+    st.session_state["cert_dados"] = data  # atualiza cache de sessão imediatamente
+
+    # ── JSON local (backup offline) ───────────────────────────────────────────
+    try:
+        CERT_DATA_FILE.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False, default=str),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+    # ── Apps Script → grava nas abas da planilha Google ───────────────────────
+    if not APPS_SCRIPT_URL:
+        return
+
+    try:
+        payload = {
+            "certificados": {
+                "cabecalho": _COLS_CERT,
+                "linhas": [[str(c.get(col, "")) for col in _COLS_CERT]
+                           for c in data.get("certificados", [])],
+            },
+            "emails": {
+                "cabecalho": _COLS_EMAIL,
+                "linhas": [[cnpj, "; ".join(lista)]
+                           for cnpj, lista in data.get("emails", {}).items()],
+            },
+            "mensagens": {
+                "cabecalho": _COLS_MSG,
+                "linhas": [[tipo, msg]
+                           for tipo, msg in data.get("mensagens", {}).items()],
+            },
+        }
+        requests.post(APPS_SCRIPT_URL, json=payload, timeout=30)
+    except Exception as e:
+        st.warning(f"Aviso: não foi possível salvar na planilha — {e}")
+
+
+def _cert_situacao(validade_iso: str):
+    """Retorna (situação, dias) a partir de 'YYYY-MM-DD'."""
+    try:
+        venc = date.fromisoformat(validade_iso)
+        dias = (venc - date.today()).days
+        if dias < 0:
+            return "VENCIDO", dias
+        if dias <= 30:
+            return "VENCENDO", dias
+        return "NORMAL", dias
+    except Exception:
+        return "DESCONHECIDO", None
+
+
+def _cert_ler_pfx(fonte, senha: str):
+    """Lê um PFX (caminho no disco ou bytes) e retorna (razao_social, documento, validade_str, validade_iso).
+    documento pode ser CNPJ (14 dígitos) ou CPF (11 dígitos).
+    """
+    import re as _re
+    from cryptography.hazmat.primitives.serialization import pkcs12
+    from cryptography import x509
+    from datetime import timezone
+
+    pfx_bytes = fonte if isinstance(fonte, (bytes, bytearray)) else Path(fonte).read_bytes()
+    _, cert, _ = pkcs12.load_key_and_certificates(pfx_bytes, senha.encode("utf-8"))
+
+    OID_ECNPJ = "2.16.76.1.3.3"
+    OID_ECPF  = "2.16.76.1.3.1"
+    documento = ""
+
+    # 1ª tentativa: SubjectAlternativeName
+    try:
+        san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+        for gn in san:
+            if isinstance(gn, x509.OtherName):
+                oid = gn.type_id.dotted_string
+                txt = "".join(chr(b) for b in gn.value if 32 <= b < 127)
+                if oid == OID_ECNPJ:
+                    m = _re.search(r"\d{14}", txt)
+                    if m:
+                        documento = m.group(0)
+                        break
+                elif oid == OID_ECPF:
+                    m = _re.search(r"\d{11}", txt)
+                    if m:
+                        documento = m.group(0)
+                        break
+    except Exception:
+        pass
+
+    # 2ª tentativa: CN no formato "NOME:DOCUMENTO"
+    if not documento:
+        try:
+            cn = cert.subject.get_attributes_for_oid(x509.oid.NameOID.COMMON_NAME)[0].value
+            if ":" in cn:
+                d = _re.sub(r"\D", "", cn.split(":")[-1])
+                if len(d) >= 14:
+                    documento = d[-14:]
+                elif len(d) >= 11:
+                    documento = d[-11:]
+        except Exception:
+            pass
+
+    razao = ""
+    try:
+        cn = cert.subject.get_attributes_for_oid(x509.oid.NameOID.COMMON_NAME)[0].value
+        razao = cn.split(":")[0].strip()
+    except Exception:
+        pass
+
+    try:
+        venc = cert.not_valid_after_utc
+    except AttributeError:
+        venc = cert.not_valid_after.replace(tzinfo=timezone.utc)
+
+    return razao, documento, venc.strftime("%d/%m/%Y"), venc.strftime("%Y-%m-%d")
+
+
+def _picker_pasta_cert():
+    import tkinter as tk
+    from tkinter import filedialog
+    root = tk.Tk()
+    root.withdraw()
+    root.wm_attributes("-topmost", True)
+    root.lift()
+    pasta = filedialog.askdirectory(title="Selecione a pasta com certificados .pfx")
+    root.destroy()
+    return pasta or ""
+
+
+def _picker_arquivo_cert():
+    import tkinter as tk
+    from tkinter import filedialog
+    root = tk.Tk()
+    root.withdraw()
+    root.wm_attributes("-topmost", True)
+    root.lift()
+    arquivo = filedialog.askopenfilename(
+        title="Selecione o certificado .pfx",
+        filetypes=[("Certificado Digital", "*.pfx"), ("Todos os arquivos", "*.*")],
+    )
+    root.destroy()
+    return arquivo or ""
+
+
+def _extrair_senha_nome(nome_arquivo: str) -> str:
+    """Extrai senha do nome: 'senha' (case-insensitive) + espaços/traços opcionais + tudo até próximo espaço."""
+    import re
+    m = re.search(r'(?i)senha[\s\-]*([^\s]+)', Path(nome_arquivo).stem)
+    return m.group(1) if m else ""
+
+
+def _enviar_outlook_cert(para: list, assunto: str, corpo: str):
+    try:
+        import win32com.client
+        ol = win32com.client.Dispatch("Outlook.Application")
+        mail = ol.CreateItem(0)
+        mail.To = "; ".join(para)
+        mail.Subject = assunto
+        mail.Body = corpo
+        mail.Send()
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
+def _cert_excel_tabela(df):
+    """Gera o .xlsx da lista de certificados formatado como Tabela do Excel
+    (estilo azul TableStyleMedium2), com Validade como data de verdade e Dias
+    como número, pra ordenar/filtrar certo dentro do Excel."""
+    from datetime import datetime as _dt
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment
+    from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.table import Table, TableStyleInfo
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "CERTIFICADOS"
+    colunas = list(df.columns)
+    ws.append(colunas)
+
+    for reg in df.itertuples(index=False):
+        linha = []
+        for col, val in zip(colunas, reg):
+            if col == "Validade":
+                try:
+                    val = _dt.strptime(str(val).strip(), "%d/%m/%Y")
+                except ValueError:
+                    pass
+            elif col == "Dias":
+                try:
+                    val = int(float(val))
+                except (TypeError, ValueError):
+                    pass
+            linha.append(val)
+        ws.append(linha)
+
+    n_linhas = ws.max_row
+    for i, col in enumerate(colunas, start=1):
+        letra = get_column_letter(i)
+        largura = max([len(str(col))] + [len(str(c.value or "")) for c in ws[letra][1:]])
+        ws.column_dimensions[letra].width = min(largura + 4, 60)
+        if col == "Validade":
+            for c in ws[letra][1:]:
+                c.number_format = "DD/MM/YYYY"
+        if col in ("Validade", "Dias", "Situação", "CPF/CNPJ"):
+            for c in ws[letra][1:]:
+                c.alignment = Alignment(horizontal="center")
+
+    # Tabela exige ao menos 1 linha de dados além do cabeçalho
+    if n_linhas >= 2:
+        tabela = Table(displayName="Certificados",
+                       ref=f"A1:{get_column_letter(len(colunas))}{n_linhas}")
+        tabela.tableStyleInfo = TableStyleInfo(name="TableStyleMedium2", showRowStripes=True)
+        ws.add_table(tabela)
+    ws.freeze_panes = "A2"
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+# ── página CERTIFICADOS ────────────────────────────────────────────────────────
+def pagina_certificados():
+    st.markdown("<h2>CERTIFICADOS DIGITAIS</h2>", unsafe_allow_html=True)
+
+    dados = _cert_carregar_dados()
+    certs = dados["certificados"]
+
+    # ── Importar certificados (um ou vários) ─────────────────────────────────
+    with st.expander("➕ Adicionar Certificados", expanded=True):
+
+        # Campo de senha padrão — sempre visível, antes do upload
+        col_sp, col_info = st.columns([2, 3])
+        with col_sp:
+            senha_padrao_global = st.text_input(
+                "🔑 Senha padrão:",
+                type="password",
+                key="cert_senha_padrao",
+                placeholder="Usada para quem não tem senha no nome",
+                help=(
+                    "Esta senha é aplicada automaticamente aos certificados cujo "
+                    "nome de arquivo NÃO contém 'SENHA xxxx'. "
+                    "Para qualquer arquivo você pode digitar uma senha individual abaixo."
+                ),
+            )
+        with col_info:
+            st.markdown(
+                "<small style='color:#555;'>"
+                "Selecione um ou mais arquivos `.pfx`. "
+                "Se o nome do arquivo já contiver a senha (ex.: <code>EMPRESA SENHA 1234.pfx</code>), "
+                "ela será detectada automaticamente. "
+                "Caso contrário, será usada a senha padrão à esquerda "
+                "— ou você pode digitar uma senha individual por arquivo."
+                "</small>",
+                unsafe_allow_html=True,
+            )
+
+        arquivos_up = st.file_uploader(
+            "Selecione os arquivos .pfx:",
+            type=["pfx"],
+            accept_multiple_files=True,
+            key="upload_pfx_multiplos",
+        )
+
+        if arquivos_up:
+            nomes_ja = {c["nome_arquivo"] for c in certs}
+            novos = [f for f in arquivos_up if f.name not in nomes_ja]
+
+            if not novos:
+                st.info(f"{len(arquivos_up)} arquivo(s) selecionado(s) — todos já estão na lista.")
+            else:
+                senhas_novas = {}
+                st.markdown(f"**{len(novos)} novo(s) certificado(s) — confira as senhas:**")
+                st.markdown("<hr style='margin:6px 0'>", unsafe_allow_html=True)
+
+                for f in novos:
+                    senha_auto = _extrair_senha_nome(f.name)
+                    c1, c2, c3 = st.columns([4, 2, 2])
+                    with c1:
+                        st.markdown(f"`{f.name}`")
+                    with c2:
+                        if senha_auto:
+                            st.markdown(f"🔒 detectada: `{senha_auto}`")
+                        elif senha_padrao_global:
+                            st.markdown(f"🔑 usará padrão: `{'*' * len(senha_padrao_global)}`")
+                        else:
+                            st.markdown("⚠️ sem senha")
+                    with c3:
+                        override = st.text_input(
+                            "Senha individual", type="password",
+                            key=f"sn_{abs(hash(f.name))}",
+                            label_visibility="collapsed",
+                            placeholder="senha individual (opcional)",
+                        )
+                    # Prioridade: individual > detectada no nome > padrão global
+                    senha_final = override or senha_auto or senha_padrao_global
+                    senhas_novas[f.name] = (f, senha_final)
+
+                st.markdown("<hr style='margin:6px 0'>", unsafe_allow_html=True)
+                if st.button("✅ Importar", key="btn_importar_pasta", type="primary"):
+                    adicionados, erros = 0, []
+                    for nome, (f_obj, senha) in senhas_novas.items():
+                        if not senha:
+                            erros.append(f"{nome}: senha não informada.")
+                            continue
+                        try:
+                            conteudo = f_obj.read()
+                            razao, cnpj, val_str, val_iso = _cert_ler_pfx(conteudo, senha)
+                            certs.append({
+                                "arquivo": nome,
+                                "nome_arquivo": nome,
+                                "senha": senha,
+                                "razao_social": razao or Path(nome).stem,
+                                "cnpj": cnpj,
+                                "validade": val_str,
+                                "validade_iso": val_iso,
+                            })
+                            adicionados += 1
+                        except Exception as e:
+                            erros.append(f"{nome}: {e}")
+                    dados["certificados"] = certs
+                    _cert_salvar_dados(dados)
+                    if adicionados:
+                        st.success(f"{adicionados} certificado(s) importado(s)!")
+                    for err in erros:
+                        st.error(err)
+                    st.rerun()
+
+    st.divider()
+
+    if not certs:
+        st.info("Nenhum certificado cadastrado. Use as opções acima para importar.")
+        return
+
+    # ── Contadores ────────────────────────────────────────────────────────────
+    rows = []
+    for c in certs:
+        sit, dias = _cert_situacao(c.get("validade_iso", ""))
+        cnpj_fmt = _formata_cnpj_mascara(c["cnpj"]) if c.get("cnpj") else ""
+        rows.append({
+            "Razão Social": c.get("razao_social", ""),
+            "CPF/CNPJ": cnpj_fmt,
+            "Validade": c.get("validade", ""),
+            "Dias": dias if dias is not None else "?",
+            "Situação": sit,
+            "_arquivo": c["arquivo"],
+            "_sit": sit,
+        })
+
+    n_vencidos = sum(1 for r in rows if r["_sit"] == "VENCIDO")
+    n_vencendo = sum(1 for r in rows if r["_sit"] == "VENCENDO")
+    n_normais  = sum(1 for r in rows if r["_sit"] == "NORMAL")
+    total_certs = len(rows)
+
+    st.markdown(
+        f"<p style='text-align:right; font-size:18px;'><b>Total:</b> {total_certs}</p>",
+        unsafe_allow_html=True,
+    )
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.markdown(
+            f"<div style='text-align:center; padding:8px; background:#fdedec; border-radius:8px; border-left:4px solid #c0392b;'>"
+            f"<span style='font-size:22px; font-weight:700; color:#c0392b;'>{n_vencidos}</span><br>"
+            f"<span style='font-size:13px; color:#555;'>Vencidos</span></div>",
+            unsafe_allow_html=True,
+        )
+    with c2:
+        st.markdown(
+            f"<div style='text-align:center; padding:8px; background:#fef9e7; border-radius:8px; border-left:4px solid #f39c12;'>"
+            f"<span style='font-size:22px; font-weight:700; color:#f39c12;'>{n_vencendo}</span><br>"
+            f"<span style='font-size:13px; color:#555;'>Vencendo em 30 dias</span></div>",
+            unsafe_allow_html=True,
+        )
+    with c3:
+        st.markdown(
+            f"<div style='text-align:center; padding:8px; background:#eafaf1; border-radius:8px; border-left:4px solid #27ae60;'>"
+            f"<span style='font-size:22px; font-weight:700; color:#27ae60;'>{n_normais}</span><br>"
+            f"<span style='font-size:13px; color:#555;'>Normais</span></div>",
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Filtro ────────────────────────────────────────────────────────────────
+    filtro_cert = st.radio(
+        "Filtrar por:",
+        ["Todos", "Vencidos", "Vencendo em 30 dias", "Normais"],
+        horizontal=True, key="filtro_cert",
+    )
+
+    mapa_sit = {"Todos": None, "Vencidos": "VENCIDO", "Vencendo em 30 dias": "VENCENDO", "Normais": "NORMAL"}
+    alvo_sit = mapa_sit[filtro_cert]
+    rows_filtradas = [r for r in rows if alvo_sit is None or r["_sit"] == alvo_sit]
+
+    if not rows_filtradas:
+        st.info("Nenhum certificado neste filtro.")
+    else:
+        df_cert = pd.DataFrame([{k: v for k, v in r.items() if not k.startswith("_")} for r in rows_filtradas])
+        cols_cert = list(df_cert.columns)  # antes do AgGrid (versões novas injetam colunas internas "::...")
+        grid_cert = exibe_aggrid(df_cert, height=350, grid_key=f"grid_certs_{filtro_cert}",
+                                 retorna_filtrado=True)
+
+        # ── Baixar Excel: respeita o filtro acima (Vencidos/Vencendo/Normais)
+        # e também os filtros/ordenação digitados nas colunas da grade. Sem
+        # filtro nenhum ("Todos" e colunas limpas) sai a lista inteira.
+        df_export = df_cert[cols_cert]
+        try:
+            df_grid = grid_cert.data
+            if isinstance(df_grid, pd.DataFrame):
+                if df_grid.empty:  # filtro das colunas não deixou nenhuma linha
+                    df_export = df_export.iloc[0:0]
+                elif set(cols_cert).issubset(df_grid.columns):
+                    df_export = df_grid[cols_cert]
+        except Exception:
+            pass
+
+        filtrado = filtro_cert != "Todos" or len(df_export) != len(df_cert)
+        sufixo = filtro_cert.lower().replace(" ", "_") if filtro_cert != "Todos" else "todos"
+        if len(df_export) != len(df_cert):
+            sufixo += "_filtrado"
+        st.download_button(
+            f"📥 Baixar Excel ({len(df_export)} certificado(s){' — filtrado' if filtrado else ''})",
+            data=_cert_excel_tabela(df_export),
+            file_name=f"certificados_{sufixo}_{date.today():%d-%m-%Y}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="btn_excel_certs",
+            disabled=df_export.empty,
+        )
+
+    # ── Remover certificado ───────────────────────────────────────────────────
+    st.divider()
+    with st.expander("🗑️ Remover Certificados da Lista", expanded=False):
+        if not certs:
+            st.info("Nenhum certificado na lista.")
+        else:
+            with st.form("form_del_cert"):
+                st.markdown("Marque os certificados que deseja excluir e clique em **Excluir**:")
+                checks = {
+                    c["arquivo"]: st.checkbox(
+                        f"{c.get('razao_social', '')} — "
+                        f"{_formata_cnpj_mascara(c.get('cnpj',''))}  ·  {c['nome_arquivo']}",
+                        key=f"chk_{abs(hash(c['arquivo']))}",
+                    )
+                    for c in certs
+                }
+                submitted = st.form_submit_button("🗑️ Excluir Selecionados", type="primary")
+                if submitted:
+                    para_remover = {arq for arq, marcado in checks.items() if marcado}
+                    if not para_remover:
+                        st.warning("Nenhum certificado marcado.")
+                    else:
+                        dados["certificados"] = [c for c in certs if c["arquivo"] not in para_remover]
+                        _cert_salvar_dados(dados)
+                        st.success(f"{len(para_remover)} certificado(s) removido(s).")
+                        st.rerun()
+
+    # ── Envio de email ────────────────────────────────────────────────────────
+    certs_vencidos = [c for c in certs if _cert_situacao(c.get("validade_iso", ""))[0] == "VENCIDO"]
+    certs_vencendo = [c for c in certs if _cert_situacao(c.get("validade_iso", ""))[0] == "VENCENDO"]
+
+    def _bloco_envio(certs_alvo, sit_alvo, label, key_sfx):
+        if not certs_alvo:
+            return
+        st.divider()
+        with st.expander(f"📧 Enviar E-mail — {label} ({len(certs_alvo)})", expanded=False):
+            opcoes_email = [
+                f"{c.get('razao_social', '')} — {_formata_cnpj_mascara(c.get('cnpj',''))}"
+                for c in certs_alvo
+            ]
+            selecionados = st.multiselect(
+                "Selecione os certificados (todos marcados por padrão):",
+                opcoes_email, default=opcoes_email, key=f"ms_email_{key_sfx}",
+            )
+            if st.button(f"📧 Enviar pelo Outlook", key=f"btn_email_{key_sfx}", type="primary"):
+                d2 = _cert_carregar_dados()
+                template = d2.get("mensagens", {}).get(
+                    "vencido" if sit_alvo == "VENCIDO" else "vencendo", ""
+                )
+                emails_cfg = d2.get("emails", {})
+                enviados, sem_email, erros = 0, 0, []
+                for cert_sel in certs_alvo:
+                    rotulo = f"{cert_sel.get('razao_social', '')} — {_formata_cnpj_mascara(cert_sel.get('cnpj',''))}"
+                    if rotulo not in selecionados:
+                        continue
+                    cnpj_raw = cert_sel.get("cnpj", "")
+                    enderecos = emails_cfg.get(cnpj_raw, [])
+                    if not enderecos:
+                        sem_email += 1
+                        continue
+                    _, dias_val = _cert_situacao(cert_sel.get("validade_iso", ""))
+                    try:
+                        corpo = template.format(
+                            razao_social=cert_sel.get("razao_social", ""),
+                            cnpj=_formata_cnpj_mascara(cnpj_raw),
+                            dias=abs(dias_val) if dias_val is not None else "?",
+                            validade=cert_sel.get("validade", ""),
+                        )
+                    except Exception:
+                        corpo = template
+                    assunto = (
+                        f"CERTIFICADO DIGITAL VENCIDO — {cert_sel.get('razao_social', '')}"
+                        if sit_alvo == "VENCIDO"
+                        else f"CERTIFICADO DIGITAL VENCENDO — {cert_sel.get('razao_social', '')}"
+                    )
+                    ok, err = _enviar_outlook_cert(enderecos, assunto, corpo)
+                    if ok:
+                        enviados += 1
+                    else:
+                        erros.append(f"{cert_sel.get('razao_social', '')}: {err}")
+                if enviados:
+                    st.success(f"{enviados} e-mail(s) enviado(s) com sucesso!")
+                if sem_email:
+                    st.warning(
+                        f"{sem_email} certificado(s) sem e-mail cadastrado. "
+                        "Cadastre os endereços em 'ENDEREÇO DE EMAIL'."
+                    )
+                for err in erros:
+                    st.error(err)
+
+    _bloco_envio(certs_vencidos, "VENCIDO",  "Vencidos",          "vencidos")
+    _bloco_envio(certs_vencendo, "VENCENDO", "Vencendo em 30 dias", "vencendo")
+
+
+# ── página ENDEREÇO DE EMAIL ───────────────────────────────────────────────────
+def pagina_emails_cnpj():
+    import re as _re_em
+    st.markdown("<h2>ENDEREÇO DE EMAIL POR CNPJ</h2>", unsafe_allow_html=True)
+
+    dados  = _cert_carregar_dados()
+    certs  = dados.get("certificados", [])
+    emails = dados.get("emails", {})
+
+    if not certs:
+        st.info("Nenhum certificado cadastrado. Importe certificados primeiro em 'CERTIFICADOS'.")
+        return
+
+    # Deduplica por CNPJ mantendo ordem de inserção
+    unicos = list({c["cnpj"]: c for c in certs if c.get("cnpj")}.values())
+
+    # ── Download do modelo / Upload da planilha ───────────────────────────────
+    col_dl, col_up = st.columns([1, 2])
+
+    with col_dl:
+        buf = BytesIO()
+        pd.DataFrame([
+            {
+                "Razão Social": c.get("razao_social", ""),
+                "CNPJ": _formata_cnpj_mascara(c["cnpj"]),
+                "E-mails": "; ".join(emails.get(c["cnpj"], [])),
+            }
+            for c in unicos
+        ] or [{"Razão Social": "", "CNPJ": "", "E-mails": ""}]).to_excel(
+            buf, index=False, engine="openpyxl"
+        )
+        buf.seek(0)
+        st.download_button(
+            "⬇️ Baixar Modelo Excel",
+            data=buf,
+            file_name="emails_certificados.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+
+    with col_up:
+        arq = st.file_uploader(
+            "📤 Importar planilha preenchida (.xlsx)",
+            type=["xlsx"],
+            key="upload_emails_xlsx",
+        )
+        if arq is not None:
+            try:
+                df_imp = pd.read_excel(BytesIO(arq.read()), engine="openpyxl")
+                df_imp.columns = df_imp.columns.str.strip()
+                importados = 0
+                for _, row in df_imp.iterrows():
+                    cnpj_d = _re_em.sub(r'\D', '', str(row.get("CNPJ", "")))
+                    lista  = [e.strip() for e in str(row.get("E-mails", "")).split(";")
+                              if e.strip() and "@" in e]
+                    if cnpj_d and lista:
+                        emails[cnpj_d] = lista
+                        importados += 1
+                if importados:
+                    dados["emails"] = emails
+                    _cert_salvar_dados(dados)
+                    st.success(f"E-mails importados para {importados} empresa(s) e salvos!")
+                    st.rerun()
+                else:
+                    st.warning("Nenhum e-mail válido encontrado. Verifique a coluna 'E-mails'.")
+            except Exception as e:
+                st.error(f"Erro ao ler a planilha: {e}")
+
+    st.divider()
+    st.markdown(
+        "Preencha ou ajuste os e-mails abaixo. "
+        "Separe múltiplos endereços com **ponto e vírgula** (`;`)."
+    )
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # Cabeçalho
+    h1, h2, h3 = st.columns([3, 2, 5])
+    with h1:
+        st.markdown("**Razão Social**")
+    with h2:
+        st.markdown("**CPF/CNPJ**")
+    with h3:
+        st.markdown("**E-mails (separados por `;`)**")
+    st.divider()
+
+    novos_emails = {}
+    for cert in unicos:
+        cnpj_raw = cert["cnpj"]
+        atual = "; ".join(emails.get(cnpj_raw, []))
+        col_r, col_c, col_e = st.columns([3, 2, 5])
+        with col_r:
+            st.markdown(cert.get("razao_social", ""))
+        with col_c:
+            st.markdown(_formata_cnpj_mascara(cnpj_raw))
+        with col_e:
+            novos_emails[cnpj_raw] = st.text_input(
+                "Emails",
+                value=atual,
+                key=f"email_input_{cnpj_raw}",
+                label_visibility="collapsed",
+                placeholder="email1@emp.com; email2@emp.com",
+            )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    if st.button("💾 Salvar E-mails", key="btn_salvar_emails", type="primary"):
+        for cnpj_raw, valor in novos_emails.items():
+            lista = [e.strip() for e in valor.split(";") if e.strip()]
+            if lista:
+                emails[cnpj_raw] = lista
+            elif cnpj_raw in emails:
+                del emails[cnpj_raw]
+        dados["emails"] = emails
+        _cert_salvar_dados(dados)
+        st.success("E-mails salvos com sucesso!")
+        st.rerun()
+
+
+# ── página MENSAGENS DE EMAIL ─────────────────────────────────────────────────
+def pagina_mensagens_email():
+    st.markdown("<h2>MENSAGENS DE E-MAIL</h2>", unsafe_allow_html=True)
+    st.markdown(
+        "Personalize os modelos de mensagem. Variáveis disponíveis: "
+        "`{razao_social}` `{cnpj}` `{dias}` `{validade}`"
+    )
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    dados = _cert_carregar_dados()
+    msgs  = dados.get("mensagens", {})
+
+    col_m1, col_m2 = st.columns(2)
+
+    with col_m1:
+        st.markdown("### Certificados Vencendo (em até 30 dias)")
+        msg_vencendo = st.text_area(
+            "Modelo — Vencendo:", value=msgs.get("vencendo", ""),
+            height=220, key="ta_msg_vencendo", label_visibility="collapsed",
+        )
+
+    with col_m2:
+        st.markdown("### Certificados Vencidos")
+        msg_vencido = st.text_area(
+            "Modelo — Vencido:", value=msgs.get("vencido", ""),
+            height=220, key="ta_msg_vencido", label_visibility="collapsed",
+        )
+
+    if st.button("💾 Salvar Mensagens", key="btn_salvar_msgs", type="primary"):
+        dados["mensagens"] = {"vencendo": msg_vencendo, "vencido": msg_vencido}
+        _cert_salvar_dados(dados)
+        st.success("Mensagens salvas com sucesso!")
+
+    st.divider()
+    st.markdown("### Pré-visualização com dados de exemplo")
+
+    exemplo = {
+        "razao_social": "EMPRESA EXEMPLO LTDA",
+        "cnpj": "12.345.678/0001-90",
+        "dias": 12,
+        "validade": "09/07/2026",
+    }
+    col_p1, col_p2 = st.columns(2)
+    with col_p1:
+        st.markdown("**Vencendo:**")
+        try:
+            st.code(msg_vencendo.format(**exemplo), language=None)
+        except Exception as e:
+            st.warning(f"Erro na variável: {e}")
+    with col_p2:
+        st.markdown("**Vencido:**")
+        try:
+            st.code(msg_vencido.format(**exemplo), language=None)
+        except Exception as e:
+            st.warning(f"Erro na variável: {e}")
+
 
 # ============================================================================
 # AUTENTICAÇÃO
@@ -226,7 +1054,7 @@ def tela_menu_principal():
     st.markdown("<h1 style='text-align:center; color:#1d3f77;'>Selecione a Área</h1>", unsafe_allow_html=True)
     st.markdown("<br>", unsafe_allow_html=True)
 
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
 
     with col1:
         st.markdown('<div class="menu-btn">', unsafe_allow_html=True)
@@ -257,6 +1085,14 @@ def tela_menu_principal():
         if st.button("SITUAÇÃO FISCAL", use_container_width=True, key="btn_situacao_fiscal"):
             st.session_state["menu_area"] = "SITUAÇÃO FISCAL"
             st.session_state["pagina_atual"] = "DASHBOARD"
+            st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with col5:
+        st.markdown('<div class="menu-btn">', unsafe_allow_html=True)
+        if st.button("CERTIFICADO DIGITAL", use_container_width=True, key="btn_cert"):
+            st.session_state["menu_area"] = "CERTIFICADO DIGITAL"
+            st.session_state["pagina_atual"] = "CERTIFICADOS"
             st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -321,7 +1157,7 @@ st.sidebar.markdown("""
 """, unsafe_allow_html=True)
 
 # Exibe a área atual e botão de voltar
-label_area = {"FISCAL": "FISCAL", "PARALEGAL": "DEPARTAMENTO PARALEGAL", "CONTÁBIL": "CONTÁBIL", "SITUAÇÃO FISCAL": "SITUAÇÃO FISCAL"}
+label_area = {"FISCAL": "FISCAL", "PARALEGAL": "DEPARTAMENTO PARALEGAL", "CONTÁBIL": "CONTÁBIL", "CERTIFICADO DIGITAL": "CERTIFICADO DIGITAL", "SITUAÇÃO FISCAL": "SITUAÇÃO FISCAL"}
 st.sidebar.markdown(f"<p style='text-align:center; color:#1d3f77; font-weight:bold; margin-top:10px;'>{label_area.get(st.session_state['menu_area'], st.session_state['menu_area'])}</p>", unsafe_allow_html=True)
 
 if st.sidebar.button("← DEPARTAMENTOS", use_container_width=True):
@@ -342,6 +1178,9 @@ elif st.session_state["menu_area"] == "PARALEGAL":
 
 elif st.session_state["menu_area"] == "CONTÁBIL":
     paginas_disponiveis = ["EMPRESAS", "OPTANTE SIMPLES", "RECEITA X DESPESA"]
+
+elif st.session_state["menu_area"] == "CERTIFICADO DIGITAL":
+    paginas_disponiveis = ["CERTIFICADOS", "ENDEREÇO DE EMAIL", "MENSAGENS DE EMAIL"]
 
 elif st.session_state["menu_area"] == "SITUAÇÃO FISCAL":
     paginas_disponiveis = ["DASHBOARD", "EMPRESAS", "CAIXA POSTAL"]
@@ -4565,3 +5404,9 @@ with st.session_state.main_container.container():
         pagina_optante_simples()
     elif pagina == "RECEITA X DESPESA":
         pagina_receita_despesa()
+    elif pagina == "CERTIFICADOS":
+        pagina_certificados()
+    elif pagina == "ENDEREÇO DE EMAIL":
+        pagina_emails_cnpj()
+    elif pagina == "MENSAGENS DE EMAIL":
+        pagina_mensagens_email()
