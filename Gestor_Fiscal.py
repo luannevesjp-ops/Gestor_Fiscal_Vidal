@@ -284,6 +284,21 @@ def _cert_carregar_dados():
             mensagens = dict(_MSG_PADRAO)
 
         dados = {"certificados": certificados, "emails": emails, "mensagens": mensagens}
+
+        # Planilha ainda sem a aba CERTIFICADOS (Apps Script não publicado) →
+        # não descarta o que foi gravado no JSON local do servidor.
+        if not certificados and CERT_DATA_FILE.exists():
+            try:
+                local = json.loads(CERT_DATA_FILE.read_text(encoding="utf-8"))
+                if local.get("certificados"):
+                    dados["certificados"] = local["certificados"]
+                    if not emails:
+                        dados["emails"] = local.get("emails", {})
+                    if local.get("mensagens"):
+                        dados["mensagens"] = {**mensagens, **local["mensagens"]}
+            except Exception:
+                pass
+
         st.session_state["cert_dados"] = dados
         return dados
 
@@ -531,8 +546,21 @@ def pagina_certificados():
     dados = _cert_carregar_dados()
     certs = dados["certificados"]
 
+    if not APPS_SCRIPT_URL:
+        st.error(
+            "⚠️ **Atenção:** a gravação dos certificados na planilha Google ainda não "
+            "está configurada neste escritório (`APPS_SCRIPT_URL` vazio). Os certificados "
+            "importados ficam só no servidor e **podem sumir** quando o sistema for "
+            "atualizado ou reiniciado. Fale com o suporte para publicar o Apps Script."
+        )
+
+    # Resultado do último Importar (guardado antes do rerun, senão a mensagem some)
+    for tipo, msg in st.session_state.pop("cert_import_msgs", []):
+        (st.success if tipo == "ok" else st.error)(msg)
+
     # ── Importar certificados (um ou vários) ─────────────────────────────────
-    with st.expander("➕ Adicionar Certificados", expanded=True):
+    n_upload = st.session_state.get("cert_upload_n", 0)
+    with st.expander("➕ Adicionar Certificados", expanded=not certs):
 
         # Campo de senha padrão — sempre visível, antes do upload
         col_sp, col_info = st.columns([2, 3])
@@ -564,7 +592,7 @@ def pagina_certificados():
             "Selecione os arquivos .pfx:",
             type=["pfx"],
             accept_multiple_files=True,
-            key="upload_pfx_multiplos",
+            key=f"upload_pfx_multiplos_{n_upload}",   # muda após importar → limpa a seleção
         )
 
         if arquivos_up:
@@ -625,10 +653,14 @@ def pagina_certificados():
                             erros.append(f"{nome}: {e}")
                     dados["certificados"] = certs
                     _cert_salvar_dados(dados)
+                    msgs = []
                     if adicionados:
-                        st.success(f"{adicionados} certificado(s) importado(s)!")
+                        msgs.append(("ok", f"✅ {adicionados} certificado(s) importado(s)!"))
                     for err in erros:
-                        st.error(err)
+                        msgs.append(("erro", f"❌ Não importado — {err} "
+                                             "Confira a senha e selecione o arquivo de novo."))
+                    st.session_state["cert_import_msgs"] = msgs
+                    st.session_state["cert_upload_n"] = n_upload + 1
                     st.rerun()
 
     st.divider()
@@ -5507,6 +5539,7 @@ def pagina_alvaras():
         "Nas colunas de alvará use <b>SIM</b>, <b>NÃO</b>, <b>ISENTO</b>, <b>EM PROCESSO</b> "
         "ou <b>INDETERMINADO</b> (alvará sem prazo de validade). "
         "Informe datas no formato <b>DD/MM/AAAA</b>. "
+        "Clique na célula para preencher; <b>Código</b> e <b>Nome</b> ficam fixos ao rolar para o lado. "
         "Clique em <b>Salvar no Sheets</b> para não perder os dados.</p>",
         unsafe_allow_html=True,
     )
@@ -5532,40 +5565,56 @@ def pagina_alvaras():
         if col in df_edit.columns:
             df_edit[col] = df_edit[col].apply(_normaliza_data_br)
 
-    df_editado = st.data_editor(
-        df_edit,
-        key="editor_alvaras",
-        use_container_width=True,
-        height=500,
-        hide_index=True,
-        disabled=["Código", "Nome", "CNPJ", "Município", "Estado"],
-        column_config={
-            "Código":                  st.column_config.TextColumn("Código",       width="small"),
-            "Nome":                    st.column_config.TextColumn("Nome",          width="large"),
-            "CNPJ":                    st.column_config.TextColumn("CNPJ",          width="medium"),
-            "Município":               st.column_config.TextColumn("Município",     width="medium"),
-            "Estado":                  st.column_config.TextColumn("Estado",        width="small"),
-            "Usuário":                 st.column_config.TextColumn("Usuário",       width="medium"),
-            "Senha":                   st.column_config.TextColumn("Senha",         width="medium"),
-            "Alvará de Localização":   st.column_config.SelectboxColumn(
-                                           "Alvará Localização",
-                                           options=_ALV_OPCOES, width="small"),
-            "Vencimento Localização":  st.column_config.TextColumn("Vencto. Localização", width="medium"),
-            "Alvará Sanitário":        st.column_config.SelectboxColumn(
-                                           "Alvará Sanitário",
-                                           options=_ALV_OPCOES, width="small"),
-            "Vencimento Sanitário":    st.column_config.TextColumn("Vencto. Sanitário",   width="medium"),
-            "Cert. Bombeiros":         st.column_config.SelectboxColumn(
-                                           "Cert. Bombeiros",
-                                           options=_ALV_OPCOES, width="small"),
-            "Vencimento Bombeiros":    st.column_config.TextColumn("Vencto. Bombeiros",   width="medium"),
-            "Meio Ambiente":           st.column_config.SelectboxColumn(
-                                           "Meio Ambiente",
-                                           options=_ALV_OPCOES, width="small"),
-            "Vencimento Meio Ambiente": st.column_config.TextColumn("Vencto. Meio Ambiente", width="medium"),
-            "Taxa de Funcionamento":   st.column_config.TextColumn("Taxa de Funcionamento", width="medium"),
+    # Grade de preenchimento em AgGrid (e não st.data_editor) porque o
+    # data_editor não deixa pintar linhas: aqui Código/Nome ficam congelados à
+    # esquerda e as linhas alternam fundo claro/azulado com divisória mais
+    # forte, pra não se perder na linha ao preencher.
+    from st_aggrid import JsCode
+    _cols_fixas = ["Código", "Nome", "CNPJ", "Município", "Estado"]
+    _cabecalhos = {
+        "Alvará de Localização": "Alvará Localização", "Vencimento Localização": "Vencto. Localização",
+        "Vencimento Sanitário": "Vencto. Sanitário", "Vencimento Bombeiros": "Vencto. Bombeiros",
+        "Vencimento Meio Ambiente": "Vencto. Meio Ambiente",
+    }
+    gb = GridOptionsBuilder.from_dataframe(df_edit)
+    gb.configure_default_column(editable=True, resizable=True, sortable=True, filter=True,
+                                minWidth=110, wrapHeaderText=True, autoHeaderHeight=True)
+    for col in df_edit.columns:
+        opcoes = dict(headerName=_cabecalhos.get(col, col))
+        if col in _cols_fixas:
+            opcoes.update(editable=False, cellStyle={"color": "#4a5568"})
+        if col in ("Alvará de Localização", "Alvará Sanitário", "Cert. Bombeiros", "Meio Ambiente"):
+            opcoes.update(cellEditor="agSelectCellEditor",
+                          cellEditorParams={"values": _ALV_OPCOES},
+                          cellStyle={"fontWeight": "600", "color": "#1d3f77"})
+        gb.configure_column(col, **opcoes)
+    gb.configure_column("Código", pinned="left", width=90, minWidth=80, filter="agTextColumnFilter")
+    gb.configure_column("Nome", pinned="left", width=300, minWidth=200, filter="agTextColumnFilter")
+    gb.configure_grid_options(
+        domLayout="normal", floatingFilter=True, headerHeight=40, rowHeight=32,
+        singleClickEdit=True, stopEditingWhenCellsLoseFocus=True,
+        getRowStyle=JsCode(
+            "function(p){ return (p.node.rowIndex % 2 === 0)"
+            " ? {background:'#ffffff'} : {background:'#e3ebf7'}; }"),
+        localeText={'filterOoo': 'Filtrar...', 'contains': 'Contém', 'equals': 'Igual',
+                    'noRowsToShow': 'Nenhum registro para mostrar'},
+    )
+    _cols_edit = list(df_edit.columns)
+    # cópia: o AgGrid 1.x acrescenta a coluna interna "::auto_unique_id::" no df recebido
+    resp = AgGrid(
+        df_edit.copy(), gridOptions=gb.build(), height=500, key="editor_alvaras",
+        columns_auto_size_mode=ColumnsAutoSizeMode.FIT_CONTENTS,
+        enable_enterprise_modules=False, allow_unsafe_jscode=True, reload_data=False,
+        update_on=["cellValueChanged"], data_return_mode=DataReturnMode.AS_INPUT,
+        custom_css={
+            ".ag-row": {"border-bottom": "1px solid #9fb0c8 !important"},
+            ".ag-row-hover": {"background-color": "#fff6d6 !important"},
+            ".ag-pinned-left-cols-container": {"border-right": "2px solid #1d3f77 !important"},
+            ".ag-pinned-left-header": {"border-right": "2px solid #1d3f77 !important"},
         },
     )
+    df_editado = resp.data if resp is not None and resp.data is not None else df_edit
+    df_editado = pd.DataFrame(df_editado).reindex(columns=_cols_edit).fillna("").astype(str)
 
     # ── Botão Salvar ──────────────────────────────────────────────────────────
     col_sv, _ = st.columns([1, 3])
