@@ -5006,7 +5006,8 @@ def _alvara_carregar():
         df = pd.read_excel(BytesIO(resp.content), sheet_name=_ABA_ALVARA,
                            engine="openpyxl", dtype=str)
         df.columns = df.columns.str.strip()
-        for col in ["Vencimento Localização", "Vencimento Sanitário", "Vencimento Bombeiros"]:
+        for col in ["Vencimento Localização", "Vencimento Sanitário", "Vencimento Bombeiros",
+                    "Vencimento Meio Ambiente"]:
             if col in df.columns:
                 df[col] = df[col].fillna("").apply(_normaliza_data_br)
         return df
@@ -5060,6 +5061,209 @@ def _modal_alvara_vencidos(df_show):
     st.dataframe(df_show.reset_index(drop=True), use_container_width=True, hide_index=True)
 
 
+# ── Painel de Situação (modelo da planilha "VIDAL MODELO ALVARAS") ──────────
+# Cada alvará cai em UM dos status abaixo, igual à planilha modelo do
+# escritório; "Não informado" é extra (linha ainda não preenchida no cadastro),
+# pra não inflar "Vencido / Sem Alvará" com empresa que ninguém conferiu.
+_ALV_TIPOS = [
+    # (rótulo no painel, coluna situação, coluna vencimento, ícone)
+    ("Bombeiros (Cercon)",        "Cert. Bombeiros",       "Vencimento Bombeiros",     "🚒"),
+    ("Funcionamento",             "Alvará de Localização", "Vencimento Localização",   "🏢"),
+    ("Sanitário",                 "Alvará Sanitário",      "Vencimento Sanitário",     "🩺"),
+    ("Meio Ambiente",             "Meio Ambiente",         "Vencimento Meio Ambiente", "🌳"),
+]
+_ALV_STATUS = [
+    # (status, cor forte, cor de fundo)
+    ("Válido",               "#27ae60", "#eafaf1"),
+    ("30 dias para vencer",  "#f39c12", "#fef5e7"),
+    ("Em processo",          "#2e86de", "#eaf2fb"),
+    ("Isento / Dispensado",  "#8e6bbf", "#f3eefa"),
+    ("Vencido / Sem Alvará", "#e74c3c", "#fdecea"),
+    ("Não informado",        "#95a5a6", "#f2f4f4"),
+]
+_ALV_OPCOES = ["", "SIM", "NÃO", "ISENTO", "EM PROCESSO", "INDETERMINADO"]
+
+
+def _alv_status_modelo(situacao, vencimento, data_ref):
+    """Mesma regra da planilha modelo: data > ref+30 → Válido; data entre ref e
+    ref+30 → 30 dias para vencer; data vencida ou NÃO → Vencido / Sem Alvará;
+    ISENTO → Isento / Dispensado; EM PROCESSO → Em processo; INDETERMINADO →
+    Válido (alvará sem prazo de validade)."""
+    from datetime import timedelta
+    s = str(situacao).strip().upper()
+    if s in ("", "NAN", "NONE"):
+        return "Não informado"
+    if s == "ISENTO":
+        return "Isento / Dispensado"
+    if s == "EM PROCESSO":
+        return "Em processo"
+    if s == "INDETERMINADO":
+        return "Válido"
+    if s == "NÃO":
+        return "Vencido / Sem Alvará"
+    dt = pd.to_datetime(str(vencimento), dayfirst=True, errors="coerce")
+    if pd.isna(dt):
+        return "Não informado"   # SIM sem data de vencimento
+    d = dt.date()
+    if d < data_ref:
+        return "Vencido / Sem Alvará"
+    if d <= data_ref + timedelta(days=30):
+        return "30 dias para vencer"
+    return "Válido"
+
+
+def _alv_painel_situacao(df_work):
+    from datetime import date
+    st.markdown("### 📊 Painel de Situação dos Alvarás")
+
+    c_ref, c_info = st.columns([1, 3])
+    with c_ref:
+        data_ref = st.date_input("Data de referência", value=date.today(),
+                                 format="DD/MM/YYYY", key="alv_data_ref")
+    with c_info:
+        st.markdown(
+            "<p style='font-size:12.5px; color:#666; margin-top:30px;'>"
+            "Vence depois de 30 dias da data de referência = <b>Válido</b> · "
+            "vence em até 30 dias = <b>30 dias para vencer</b> · já venceu ou "
+            "marcado NÃO = <b>Vencido / Sem Alvará</b>.</p>",
+            unsafe_allow_html=True,
+        )
+
+    df_st = df_work[[c for c in ["Código", "Nome", "Município", "Estado"] if c in df_work.columns]].copy()
+    for rotulo, col_sit, col_venc, _ in _ALV_TIPOS:
+        df_st[rotulo] = [
+            _alv_status_modelo(r.get(col_sit, ""), r.get(col_venc, ""), data_ref)
+            for _, r in df_work.iterrows()
+        ]
+        df_st[f"Venc. {rotulo}"] = df_work[col_venc] if col_venc in df_work.columns else ""
+    total = int(df_st.shape[0])
+
+    # ── 4 cards (um por tipo de alvará) ───────────────────────────────────
+    cards = []
+    for rotulo, _, _, icone in _ALV_TIPOS:
+        cont = df_st[rotulo].value_counts()
+        em_dia = int(cont.get("Válido", 0) + cont.get("Isento / Dispensado", 0))
+        pct_em_dia = (em_dia / total * 100) if total else 0
+        barra = "".join(
+            f"<div title='{s}: {int(cont.get(s, 0))}' style='width:{cont.get(s, 0) / total * 100 if total else 0:.2f}%;"
+            f"background:{cor};'></div>"
+            for s, cor, _ in _ALV_STATUS
+        )
+        linhas = "".join(
+            f"<div style='display:flex; justify-content:space-between; align-items:center; "
+            f"padding:3px 8px; margin:2px 0; border-radius:6px; background:{fundo};'>"
+            f"<span style='font-size:12px; color:#333;'>"
+            f"<span style='display:inline-block; width:9px; height:9px; border-radius:50%; "
+            f"background:{cor}; margin-right:6px;'></span>{s}</span>"
+            f"<span style='font-size:12px; color:{cor}; font-weight:700;'>"
+            f"{int(cont.get(s, 0))} <span style='color:#888; font-weight:400;'>"
+            f"({(cont.get(s, 0) / total * 100) if total else 0:.1f}%)</span></span></div>"
+            for s, cor, fundo in _ALV_STATUS
+        )
+        cor_em_dia = "#27ae60" if pct_em_dia >= 70 else ("#f39c12" if pct_em_dia >= 40 else "#e74c3c")
+        cards.append(
+            f"<div style='flex:1 1 230px; background:white; border:1px solid #e3e8f0; "
+            f"border-radius:14px; padding:14px 14px 10px; box-shadow:0 2px 8px rgba(29,63,119,.07);'>"
+            f"<div style='display:flex; justify-content:space-between; align-items:flex-start;'>"
+            f"<div style='font-size:14px; font-weight:700; color:#1d3f77;'>{icone} {rotulo}</div>"
+            f"<div style='text-align:right;'><div style='font-size:22px; font-weight:800; "
+            f"color:{cor_em_dia}; line-height:1;'>{pct_em_dia:.0f}%</div>"
+            f"<div style='font-size:10px; color:#888;'>em dia</div></div></div>"
+            f"<div style='display:flex; height:10px; border-radius:6px; overflow:hidden; "
+            f"margin:10px 0 8px; background:#eef1f5;'>{barra}</div>"
+            f"{linhas}</div>"
+        )
+    st.markdown(
+        f"<div style='display:flex; flex-wrap:wrap; gap:14px; margin:6px 0 14px;'>{''.join(cards)}</div>"
+        f"<p style='font-size:11.5px; color:#888; margin-top:-6px;'>"
+        f"Percentuais sobre {total} empresa(s) do cadastro · <b>em dia</b> = Válido + Isento / Dispensado.</p>",
+        unsafe_allow_html=True,
+    )
+
+    # ── Quadro resumo (igual ao topo da planilha modelo) ──────────────────
+    with st.expander("📋 Quadro resumo (status × tipo de alvará)", expanded=False):
+        th = "padding:7px 10px; background:#1d3f77; color:white; font-size:12.5px; text-align:center;"
+        cab = f"<th style='{th} text-align:left;'>Status</th>" + "".join(
+            f"<th style='{th}'>{icone} {rotulo}</th>" for rotulo, _, _, icone in _ALV_TIPOS
+        )
+        corpo = ""
+        for s, cor, fundo in _ALV_STATUS:
+            celulas = ""
+            for rotulo, _, _, _ in _ALV_TIPOS:
+                n = int((df_st[rotulo] == s).sum())
+                pct = (n / total * 100) if total else 0
+                celulas += (
+                    f"<td style='padding:6px 10px; text-align:center; background:{fundo}; "
+                    f"border-bottom:1px solid #fff;'><b style='color:{cor};'>{pct:.1f}%</b>"
+                    f"<span style='color:#888; font-size:11px;'> ({n})</span></td>"
+                )
+            corpo += (
+                f"<tr><td style='padding:6px 10px; font-size:12.5px; border-bottom:1px solid #eee;'>"
+                f"<span style='display:inline-block; width:9px; height:9px; border-radius:50%; "
+                f"background:{cor}; margin-right:6px;'></span>{s}</td>{celulas}</tr>"
+            )
+        corpo += (
+            "<tr><td style='padding:6px 10px; font-weight:700; color:#1d3f77;'>Total</td>"
+            + "".join(f"<td style='padding:6px 10px; text-align:center; font-weight:700; color:#1d3f77;'>"
+                      f"100% ({total})</td>" for _ in _ALV_TIPOS)
+            + "</tr>"
+        )
+        st.markdown(
+            f"<div style='overflow-x:auto;'><table style='width:100%; border-collapse:collapse; "
+            f"border-radius:10px; overflow:hidden;'><thead><tr>{cab}</tr></thead>"
+            f"<tbody>{corpo}</tbody></table></div>",
+            unsafe_allow_html=True,
+        )
+
+    # ── Situação por empresa (filtrável) ──────────────────────────────────
+    st.markdown("#### 🔎 Situação por empresa")
+    f1, f2, f3 = st.columns([1.2, 2, 1.5])
+    with f1:
+        tipo_sel = st.selectbox("Alvará", ["Todos"] + [t[0] for t in _ALV_TIPOS], key="alv_f_tipo")
+    with f2:
+        status_sel = st.multiselect("Situação", [s[0] for s in _ALV_STATUS], key="alv_f_status",
+                                    placeholder="Todas")
+    with f3:
+        busca = st.text_input("Buscar empresa", key="alv_f_busca", placeholder="Nome ou código")
+
+    tipos_filtro = [t[0] for t in _ALV_TIPOS] if tipo_sel == "Todos" else [tipo_sel]
+    df_f = df_st.copy()
+    if status_sel:
+        df_f = df_f[df_f[tipos_filtro].isin(status_sel).any(axis=1)]
+    if busca.strip():
+        b = busca.strip().upper()
+        df_f = df_f[df_f["Nome"].astype(str).str.upper().str.contains(b, regex=False)
+                    | df_f["Código"].astype(str).str.contains(b, regex=False)]
+
+    cols_base = [c for c in ["Código", "Nome", "Município"] if c in df_f.columns]
+    if tipo_sel == "Todos":
+        df_exib = df_f[cols_base + tipos_filtro].copy()
+    else:
+        df_exib = df_f[cols_base + [tipo_sel, f"Venc. {tipo_sel}"]].copy()
+        df_exib = df_exib.rename(columns={tipo_sel: "Situação", f"Venc. {tipo_sel}": "Vencimento"})
+
+        def _dias(v):
+            dt = pd.to_datetime(str(v), dayfirst=True, errors="coerce")
+            return "" if pd.isna(dt) else str((dt.date() - data_ref).days)
+        df_exib["Dias p/ vencer"] = df_exib["Vencimento"].apply(_dias)
+
+    cores = {s: (cor, fundo) for s, cor, fundo in _ALV_STATUS}
+
+    def _pinta(v):
+        if v in cores:
+            cor, fundo = cores[v]
+            return f"background-color:{fundo}; color:{cor}; font-weight:600;"
+        return ""
+
+    cols_status = tipos_filtro if tipo_sel == "Todos" else ["Situação"]
+    st.caption(f"{df_exib.shape[0]} de {total} empresa(s)")
+    st.dataframe(
+        df_exib.reset_index(drop=True).style.map(_pinta, subset=cols_status),
+        use_container_width=True, hide_index=True,
+        height=min(38 + 35 * max(df_exib.shape[0], 1), 420),
+    )
+
+
 def pagina_alvaras():
     import plotly.graph_objects as go
     st.empty()
@@ -5084,7 +5288,9 @@ def pagina_alvaras():
         _COLS_EXTRAS = ["Usuário", "Senha",
                         "Alvará de Localização", "Vencimento Localização",
                         "Alvará Sanitário",       "Vencimento Sanitário",
-                        "Cert. Bombeiros",         "Vencimento Bombeiros"]
+                        "Cert. Bombeiros",         "Vencimento Bombeiros",
+                        "Meio Ambiente",           "Vencimento Meio Ambiente",
+                        "Taxa de Funcionamento"]
 
         if not df_sheets.empty and "Código" in df_sheets.columns:
             # Sheets já tem dados completos — usa diretamente
@@ -5140,7 +5346,11 @@ def pagina_alvaras():
     def _classifica_coluna(col_alvara, col_venc):
         resultado = []
         for _, row in df_work.iterrows():
-            tem = str(row.get(col_alvara, "")).strip().upper() == "SIM"
+            situacao = str(row.get(col_alvara, "")).strip().upper()
+            if situacao == "INDETERMINADO":
+                resultado.append("Válido")
+                continue
+            tem = situacao == "SIM"
             if not tem:
                 resultado.append("Sem Alvará")
             else:
@@ -5274,6 +5484,7 @@ def pagina_alvaras():
     total_loc  = (df_work["Alvará de Localização"].astype(str).str.upper() == "SIM").sum()
     total_san  = (df_work["Alvará Sanitário"].astype(str).str.upper() == "SIM").sum()
     total_bomb = (df_work["Cert. Bombeiros"].astype(str).str.upper() == "SIM").sum()
+    total_amb  = (df_work["Meio Ambiente"].astype(str).str.upper() == "SIM").sum()
 
     st.markdown(
         f"<div style='background:#f4f6fa; border-radius:10px; padding:12px 16px; margin-bottom:12px;'>"
@@ -5283,15 +5494,22 @@ def pagina_alvaras():
         f"<span style='color:#1d3f77; font-weight:600;'>Sanitário:</span> <b>{total_san}</b>"
         f" &nbsp;|&nbsp; "
         f"<span style='color:#1d3f77; font-weight:600;'>Bombeiros:</span> <b>{total_bomb}</b>"
+        f" &nbsp;|&nbsp; "
+        f"<span style='color:#1d3f77; font-weight:600;'>Meio Ambiente:</span> <b>{total_amb}</b>"
         f"</div>",
         unsafe_allow_html=True,
     )
+
+    # ── Painel de Situação (modelo da planilha do escritório) ─────────────────
+    _alv_painel_situacao(df_work)
+    st.divider()
 
     # ── Tabela editável ───────────────────────────────────────────────────────
     st.markdown("### Cadastro de Alvarás")
     st.markdown(
         "<p style='font-size:13px; color:#666;'>"
-        "Use <b>SIM</b> ou <b>NÃO</b> nas colunas de alvará. "
+        "Nas colunas de alvará use <b>SIM</b>, <b>NÃO</b>, <b>ISENTO</b>, <b>EM PROCESSO</b> "
+        "ou <b>INDETERMINADO</b> (alvará sem prazo de validade). "
         "Informe datas no formato <b>DD/MM/AAAA</b>. "
         "Clique em <b>Salvar no Sheets</b> para não perder os dados.</p>",
         unsafe_allow_html=True,
@@ -5301,16 +5519,20 @@ def pagina_alvaras():
                  "Usuário", "Senha",
                  "Alvará de Localização", "Vencimento Localização",
                  "Alvará Sanitário", "Vencimento Sanitário",
-                 "Cert. Bombeiros", "Vencimento Bombeiros"]
+                 "Cert. Bombeiros", "Vencimento Bombeiros",
+                 "Meio Ambiente", "Vencimento Meio Ambiente",
+                 "Taxa de Funcionamento"]
     df_edit = df_work[[c for c in cols_exib if c in df_work.columns]].copy()
 
     # Garante strings puras — SelectboxColumn não aceita NaN/float
     for col in df_edit.columns:
         df_edit[col] = df_edit[col].fillna("").astype(str).replace({"nan": "", "None": "", "NaT": ""})
-    for col in ["Alvará de Localização", "Alvará Sanitário", "Cert. Bombeiros"]:
+    for col in ["Alvará de Localização", "Alvará Sanitário", "Cert. Bombeiros", "Meio Ambiente"]:
         if col in df_edit.columns:
-            df_edit[col] = df_edit[col].apply(lambda v: v if v in ("SIM", "NÃO") else "")
-    for col in ["Vencimento Localização", "Vencimento Sanitário", "Vencimento Bombeiros"]:
+            df_edit[col] = df_edit[col].str.strip().str.upper().apply(
+                lambda v: v if v in _ALV_OPCOES else "")
+    for col in ["Vencimento Localização", "Vencimento Sanitário", "Vencimento Bombeiros",
+                "Vencimento Meio Ambiente"]:
         if col in df_edit.columns:
             df_edit[col] = df_edit[col].apply(_normaliza_data_br)
 
@@ -5331,16 +5553,21 @@ def pagina_alvaras():
             "Senha":                   st.column_config.TextColumn("Senha",         width="medium"),
             "Alvará de Localização":   st.column_config.SelectboxColumn(
                                            "Alvará Localização",
-                                           options=["", "SIM", "NÃO"], width="small"),
+                                           options=_ALV_OPCOES, width="small"),
             "Vencimento Localização":  st.column_config.TextColumn("Vencto. Localização", width="medium"),
             "Alvará Sanitário":        st.column_config.SelectboxColumn(
                                            "Alvará Sanitário",
-                                           options=["", "SIM", "NÃO"], width="small"),
+                                           options=_ALV_OPCOES, width="small"),
             "Vencimento Sanitário":    st.column_config.TextColumn("Vencto. Sanitário",   width="medium"),
             "Cert. Bombeiros":         st.column_config.SelectboxColumn(
                                            "Cert. Bombeiros",
-                                           options=["", "SIM", "NÃO"], width="small"),
+                                           options=_ALV_OPCOES, width="small"),
             "Vencimento Bombeiros":    st.column_config.TextColumn("Vencto. Bombeiros",   width="medium"),
+            "Meio Ambiente":           st.column_config.SelectboxColumn(
+                                           "Meio Ambiente",
+                                           options=_ALV_OPCOES, width="small"),
+            "Vencimento Meio Ambiente": st.column_config.TextColumn("Vencto. Meio Ambiente", width="medium"),
+            "Taxa de Funcionamento":   st.column_config.TextColumn("Taxa de Funcionamento", width="medium"),
         },
     )
 
