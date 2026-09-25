@@ -5069,8 +5069,10 @@ def _modal_alvara_validos(df_show):
 
 # ── Painel de Situação (modelo da planilha "VIDAL MODELO ALVARAS") ──────────
 # Cada alvará cai em UM dos status abaixo, igual à planilha modelo do
-# escritório; "Não informado" é extra (linha ainda não preenchida no cadastro),
-# pra não inflar "Vencido / Sem Alvará" com empresa que ninguém conferiu.
+# escritório, com duas diferenças: "Vencido" (tem alvará, data passou) e "Sem
+# Alvará" (marcado NÃO) ficam separados — assim Válido + 30 dias + Vencido bate
+# com o total "com alvará" dos donuts de cima — e "Não informado" é extra
+# (linha ainda não preenchida no cadastro).
 _ALV_TIPOS = [
     # (rótulo no painel, coluna situação, coluna vencimento, ícone)
     ("Bombeiros (Cercon)",        "Cert. Bombeiros",       "Vencimento Bombeiros",     "🚒"),
@@ -5084,7 +5086,8 @@ _ALV_STATUS = [
     ("30 dias para vencer",  "#f39c12", "#fef5e7"),
     ("Em processo",          "#2e86de", "#eaf2fb"),
     ("Isento / Dispensado",  "#8e6bbf", "#f3eefa"),
-    ("Vencido / Sem Alvará", "#e74c3c", "#fdecea"),
+    ("Vencido",              "#e74c3c", "#fdecea"),
+    ("Sem Alvará",           "#5d6d7e", "#ebedef"),
     ("Não informado",        "#95a5a6", "#f2f4f4"),
 ]
 _ALV_OPCOES = ["", "SIM", "NÃO", "ISENTO", "EM PROCESSO", "INDETERMINADO"]
@@ -5092,7 +5095,7 @@ _ALV_OPCOES = ["", "SIM", "NÃO", "ISENTO", "EM PROCESSO", "INDETERMINADO"]
 
 def _alv_status_modelo(situacao, vencimento, data_ref):
     """Mesma regra da planilha modelo: data > ref+30 → Válido; data entre ref e
-    ref+30 → 30 dias para vencer; data vencida ou NÃO → Vencido / Sem Alvará;
+    ref+30 → 30 dias para vencer; data vencida → Vencido; NÃO → Sem Alvará;
     ISENTO → Isento / Dispensado; EM PROCESSO → Em processo; INDETERMINADO →
     Válido (alvará sem prazo de validade)."""
     from datetime import timedelta
@@ -5106,13 +5109,13 @@ def _alv_status_modelo(situacao, vencimento, data_ref):
     if s == "INDETERMINADO":
         return "Válido"
     if s == "NÃO":
-        return "Vencido / Sem Alvará"
+        return "Sem Alvará"
     dt = pd.to_datetime(str(vencimento), dayfirst=True, errors="coerce")
     if pd.isna(dt):
         return "Não informado"   # SIM sem data de vencimento
     d = dt.date()
     if d < data_ref:
-        return "Vencido / Sem Alvará"
+        return "Vencido"
     if d <= data_ref + timedelta(days=30):
         return "30 dias para vencer"
     return "Válido"
@@ -5130,8 +5133,8 @@ def _alv_painel_situacao(df_work):
         st.markdown(
             "<p style='font-size:12.5px; color:#666; margin-top:30px;'>"
             "Vence depois de 30 dias da data de referência = <b>Válido</b> · "
-            "vence em até 30 dias = <b>30 dias para vencer</b> · já venceu ou "
-            "marcado NÃO = <b>Vencido / Sem Alvará</b>.</p>",
+            "vence em até 30 dias = <b>30 dias para vencer</b> · já venceu = "
+            "<b>Vencido</b> · marcado NÃO = <b>Sem Alvará</b>.</p>",
             unsafe_allow_html=True,
         )
 
@@ -5146,8 +5149,11 @@ def _alv_painel_situacao(df_work):
 
     # ── 4 cards (um por tipo de alvará) ───────────────────────────────────
     cards = []
-    for rotulo, _, _, icone in _ALV_TIPOS:
+    for rotulo, col_sit, _, icone in _ALV_TIPOS:
         cont = df_st[rotulo].value_counts()
+        # mesmo critério do "com alvará" dos donuts de cima (SIM/INDETERMINADO)
+        com_alvara = int(df_work[col_sit].astype(str).str.strip().str.upper()
+                         .isin(["SIM", "INDETERMINADO"]).sum()) if col_sit in df_work.columns else 0
         em_dia = int(cont.get("Válido", 0) + cont.get("Isento / Dispensado", 0))
         pct_em_dia = (em_dia / total * 100) if total else 0
         barra = "".join(
@@ -5171,7 +5177,9 @@ def _alv_painel_situacao(df_work):
             f"<div style='flex:1 1 230px; background:white; border:1px solid #e3e8f0; "
             f"border-radius:14px; padding:14px 14px 10px; box-shadow:0 2px 8px rgba(29,63,119,.07);'>"
             f"<div style='display:flex; justify-content:space-between; align-items:flex-start;'>"
-            f"<div style='font-size:14px; font-weight:700; color:#1d3f77;'>{icone} {rotulo}</div>"
+            f"<div><div style='font-size:14px; font-weight:700; color:#1d3f77;'>{icone} {rotulo}</div>"
+            f"<div style='font-size:11px; color:#666; margin-top:2px;'>"
+            f"<b style='color:#1d3f77;'>{com_alvara}</b> com alvará</div></div>"
             f"<div style='text-align:right;'><div style='font-size:22px; font-weight:800; "
             f"color:{cor_em_dia}; line-height:1;'>{pct_em_dia:.0f}%</div>"
             f"<div style='font-size:10px; color:#888;'>em dia</div></div></div>"
