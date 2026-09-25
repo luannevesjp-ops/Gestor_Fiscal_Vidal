@@ -5049,15 +5049,21 @@ def _classifica_vencimento_alvara(data_str):
         return "Sem Data"
 
 
-@st.dialog("Alvarás — Vencendo (até 30 dias)")
+@st.dialog("Alvarás — Vencendo (até 30 dias)", width="large")
 def _modal_alvara_vencendo(df_show):
     st.markdown(f"**{df_show.shape[0]} empresa(s) com alvará vencendo em até 30 dias**")
     st.dataframe(df_show.reset_index(drop=True), use_container_width=True, hide_index=True)
 
 
-@st.dialog("Alvarás — Vencidos")
+@st.dialog("Alvarás — Vencidos", width="large")
 def _modal_alvara_vencidos(df_show):
     st.markdown(f"**{df_show.shape[0]} empresa(s) com alvará vencido**")
+    st.dataframe(df_show.reset_index(drop=True), use_container_width=True, hide_index=True)
+
+
+@st.dialog("Alvarás — Válidos", width="large")
+def _modal_alvara_validos(df_show):
+    st.markdown(f"**{df_show.shape[0]} empresa(s) com alvará válido**")
     st.dataframe(df_show.reset_index(drop=True), use_container_width=True, hide_index=True)
 
 
@@ -5362,7 +5368,7 @@ def pagina_alvaras():
     df_work["_st_bomb"] = _classifica_coluna("Cert. Bombeiros",         "Vencimento Bombeiros")
 
     # ── Função de donut reutilizável ──────────────────────────────────────────
-    def _donut(status_col, titulo, chart_key):
+    def _donut(status_col, titulo, chart_key, col_venc, grp):
         serie = df_work[status_col]
         com_alvara = serie[serie != "Sem Alvará"]
         validos  = (com_alvara == "Válido").sum()
@@ -5382,7 +5388,7 @@ def pagina_alvaras():
             sort=False,
         )])
         fig.update_layout(
-            paper_bgcolor="white", plot_bgcolor="white",
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
             showlegend=False,
             margin=dict(t=8, b=8, l=8, r=8),
             height=200,
@@ -5398,86 +5404,68 @@ def pagina_alvaras():
         )
         st.plotly_chart(fig, use_container_width=True, key=chart_key)
 
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.markdown(
-                f"<div style='text-align:center; padding:5px; background:#eafaf1; "
-                f"border-radius:8px; border-left:3px solid #27ae60;'>"
-                f"<b style='font-size:16px; color:#27ae60;'>{validos}</b><br>"
-                f"<span style='font-size:10px;'>Válidos</span></div>",
-                unsafe_allow_html=True,
-            )
-        with c2:
-            st.markdown(
-                f"<div style='text-align:center; padding:5px; background:#fef9e7; "
-                f"border-radius:8px; border-left:3px solid #f39c12;'>"
-                f"<b style='font-size:16px; color:#f39c12;'>{vencendo}</b><br>"
-                f"<span style='font-size:10px;'>Vencendo</span></div>",
-                unsafe_allow_html=True,
-            )
-        with c3:
-            st.markdown(
-                f"<div style='text-align:center; padding:5px; background:#fdf2f2; "
-                f"border-radius:8px; border-left:3px solid #e74c3c;'>"
-                f"<b style='font-size:16px; color:#e74c3c;'>{vencidos}</b><br>"
-                f"<span style='font-size:10px;'>Vencidos</span></div>",
-                unsafe_allow_html=True,
-            )
+        # Quadradinhos clicáveis: o próprio número abre a lista da empresa
+        cols_modal = ["Código", "Nome", "CNPJ", "Município", col_venc]
+        cartoes = [
+            ("Válido",   validos,  "Válidos",  "ok",  _modal_alvara_validos),
+            ("Vencendo", vencendo, "Vencendo", "ve",  _modal_alvara_vencendo),
+            ("Vencido",  vencidos, "Vencidos", "vd",  _modal_alvara_vencidos),
+        ]
+        for coluna, (status, qtd, rotulo, tipo, modal) in zip(st.columns(3), cartoes):
+            with coluna:
+                with st.container(key=f"alvcard_{tipo}_{grp}"):
+                    if st.button(f"**{qtd}**\n\n{rotulo}", key=f"btn_alv_{tipo}_{grp}",
+                                 use_container_width=True,
+                                 help=f"Clique para ver as empresas ({rotulo.lower()})"):
+                        modal(df_work[df_work[status_col] == status][
+                            [c for c in cols_modal if c in df_work.columns]
+                        ].reset_index(drop=True))
+
+    # ── Estilo dos quadradinhos + linha separando os 3 alvarás ────────────────
+    _css_cards = ""
+    for tipo, cor, fundo in [("ok", "#27ae60", "#eafaf1"),
+                             ("ve", "#f39c12", "#fef9e7"),
+                             ("vd", "#e74c3c", "#fdf2f2")]:
+        _css_cards += (
+            f"div[class*='st-key-alvcard_{tipo}_'] button {{"
+            f"  background:{fundo} !important; border:1px solid {fundo} !important;"
+            f"  border-left:3px solid {cor} !important; border-radius:8px !important;"
+            f"  padding:9px 4px !important; min-height:0 !important; transition:all .15s; }}"
+            f"div[class*='st-key-alvcard_{tipo}_'] button:hover {{"
+            f"  border-color:{cor} !important; box-shadow:0 3px 10px rgba(0,0,0,.10);"
+            f"  transform:translateY(-1px); }}"
+            f"div[class*='st-key-alvcard_{tipo}_'] button p {{ margin:0 !important;"
+            f"  font-size:11px !important; color:#333 !important; line-height:1.3 !important; }}"
+            f"div[class*='st-key-alvcard_{tipo}_'] button p:first-child {{"
+            f"  font-size:19px !important; color:{cor} !important; }}"
+        )
+    st.markdown(
+        f"<style>{_css_cards}"
+        ".st-key-alvgrp_loc, .st-key-alvgrp_san {"
+        "  border-right:1px solid #d5dce8; padding-right:18px; }"
+        "</style>",
+        unsafe_allow_html=True,
+    )
 
     # ── 3 Dashboards lado a lado ──────────────────────────────────────────────
-    col_d1, col_d2, col_d3 = st.columns(3)
+    col_d1, col_d2, col_d3 = st.columns(3, gap="medium")
 
     with col_d1:
-        _donut("_st_loc", "Alvará de Localização e Funcionamento", "chart_alv_loc")
-        st.markdown("<br>", unsafe_allow_html=True)
-        b1, b2 = st.columns(2)
-        with b1:
-            if st.button("Ver Vencendo", key="btn_loc_ve", use_container_width=True):
-                df_m = df_work[df_work["_st_loc"] == "Vencendo"][
-                    ["Código", "Nome", "CNPJ", "Município", "Vencimento Localização"]
-                ].reset_index(drop=True)
-                _modal_alvara_vencendo(df_m)
-        with b2:
-            if st.button("Ver Vencidos", key="btn_loc_vd", use_container_width=True):
-                df_m = df_work[df_work["_st_loc"] == "Vencido"][
-                    ["Código", "Nome", "CNPJ", "Município", "Vencimento Localização"]
-                ].reset_index(drop=True)
-                _modal_alvara_vencidos(df_m)
+        with st.container(key="alvgrp_loc"):
+            _donut("_st_loc", "Alvará de Localização e Funcionamento", "chart_alv_loc",
+                   "Vencimento Localização", "loc")
 
     with col_d2:
-        _donut("_st_san", "Alvará Sanitário", "chart_alv_san")
-        st.markdown("<br>", unsafe_allow_html=True)
-        b1, b2 = st.columns(2)
-        with b1:
-            if st.button("Ver Vencendo", key="btn_san_ve", use_container_width=True):
-                df_m = df_work[df_work["_st_san"] == "Vencendo"][
-                    ["Código", "Nome", "CNPJ", "Município", "Vencimento Sanitário"]
-                ].reset_index(drop=True)
-                _modal_alvara_vencendo(df_m)
-        with b2:
-            if st.button("Ver Vencidos", key="btn_san_vd", use_container_width=True):
-                df_m = df_work[df_work["_st_san"] == "Vencido"][
-                    ["Código", "Nome", "CNPJ", "Município", "Vencimento Sanitário"]
-                ].reset_index(drop=True)
-                _modal_alvara_vencidos(df_m)
+        with st.container(key="alvgrp_san"):
+            _donut("_st_san", "Alvará Sanitário", "chart_alv_san",
+                   "Vencimento Sanitário", "san")
 
     with col_d3:
-        _donut("_st_bomb", "Certificado do Corpo de Bombeiros", "chart_alv_bomb")
-        st.markdown("<br>", unsafe_allow_html=True)
-        b1, b2 = st.columns(2)
-        with b1:
-            if st.button("Ver Vencendo", key="btn_bomb_ve", use_container_width=True):
-                df_m = df_work[df_work["_st_bomb"] == "Vencendo"][
-                    ["Código", "Nome", "CNPJ", "Município", "Vencimento Bombeiros"]
-                ].reset_index(drop=True)
-                _modal_alvara_vencendo(df_m)
-        with b2:
-            if st.button("Ver Vencidos", key="btn_bomb_vd", use_container_width=True):
-                df_m = df_work[df_work["_st_bomb"] == "Vencido"][
-                    ["Código", "Nome", "CNPJ", "Município", "Vencimento Bombeiros"]
-                ].reset_index(drop=True)
-                _modal_alvara_vencidos(df_m)
+        with st.container(key="alvgrp_bomb"):
+            _donut("_st_bomb", "Certificado do Corpo de Bombeiros", "chart_alv_bomb",
+                   "Vencimento Bombeiros", "bomb")
 
+    st.caption("Clique no número de cada quadradinho para ver a lista de empresas.")
     st.divider()
 
     # ── Total de empresas com cada alvará ─────────────────────────────────────
