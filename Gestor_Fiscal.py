@@ -381,11 +381,20 @@ CERT_DRIVE_ESCRITORIO = "VIDAL"
 def _cert_enviar_drive(nome, conteudo, senha, cnpj, razao, validade_iso):
     """Retorna (True, "") se guardou, (False, erro) se falhou,
     (None, "") se o envio não está configurado."""
-    try:
-        url = str(st.secrets.get("CERT_DRIVE_URL", ""))
-        token = str(st.secrets.get("CERT_DRIVE_TOKEN", ""))
-    except Exception:   # sem secrets.toml (rodando local)
-        url, token = "", ""
+    def _secret(nome):
+        # No TOML, uma chave colada depois de um "[secao]" vai parar dentro da
+        # seção — procura no topo e, se não achar, dentro de cada seção.
+        try:
+            if nome in st.secrets:
+                return str(st.secrets[nome]).strip()
+            for val in st.secrets.values():
+                if hasattr(val, "get") and val.get(nome):
+                    return str(val.get(nome)).strip()
+        except Exception:   # sem secrets.toml (rodando local)
+            pass
+        return ""
+
+    url, token = _secret("CERT_DRIVE_URL"), _secret("CERT_DRIVE_TOKEN")
     if not url or not token:
         return None, ""
     try:
@@ -824,8 +833,13 @@ def pagina_certificados():
                     if adicionados:
                         msgs.append(("ok", f"✅ {adicionados} certificado(s) importado(s)!"))
                     if drive_desligado:
+                        try:
+                            chaves = ", ".join(sorted(st.secrets.keys())) or "nenhuma"
+                        except Exception:
+                            chaves = "nenhuma (sem Secrets)"
                         msgs.append(("erro", "⚠️ Cópia no Drive desligada: faltam CERT_DRIVE_URL e/ou "
-                                             "CERT_DRIVE_TOKEN nos Secrets do app."))
+                                             f"CERT_DRIVE_TOKEN nos Secrets do app. Chaves que o app "
+                                             f"enxerga hoje: {chaves}."))
                     if drive_ok:
                         msgs.append(("ok", f"☁️ {drive_ok} arquivo(s) guardado(s) no Drive."))
                     for err in drive_erros:
