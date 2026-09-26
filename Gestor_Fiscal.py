@@ -787,7 +787,7 @@ def pagina_certificados():
                 st.markdown("<hr style='margin:6px 0'>", unsafe_allow_html=True)
                 if st.button("✅ Importar", key="btn_importar_pasta", type="primary"):
                     adicionados, erros = 0, []
-                    drive_ok, drive_erros = 0, []
+                    drive_ok, drive_erros, drive_desligado = 0, [], False
                     for nome, (f_obj, senha) in senhas_novas.items():
                         if not senha:
                             erros.append(f"{nome}: senha não informada.")
@@ -816,11 +816,16 @@ def pagina_certificados():
                             drive_ok += 1
                         elif ok_drive is False:
                             drive_erros.append(f"{nome}: {msg_drive}")
+                        else:
+                            drive_desligado = True
                     dados["certificados"] = certs
                     _cert_salvar_dados(dados)
                     msgs = []
                     if adicionados:
                         msgs.append(("ok", f"✅ {adicionados} certificado(s) importado(s)!"))
+                    if drive_desligado:
+                        msgs.append(("erro", "⚠️ Cópia no Drive desligada: faltam CERT_DRIVE_URL e/ou "
+                                             "CERT_DRIVE_TOKEN nos Secrets do app."))
                     if drive_ok:
                         msgs.append(("ok", f"☁️ {drive_ok} arquivo(s) guardado(s) no Drive."))
                     for err in drive_erros:
