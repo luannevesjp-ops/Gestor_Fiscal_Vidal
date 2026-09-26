@@ -372,35 +372,22 @@ def _cert_salvar_dados(data):
 
 
 # Cópia dos arquivos .pfx na pasta CERTIFICADOS do Drive — Apps Script único
-# para os 6 escritórios (apps_script_certificados_drive.gs). URL e token ficam
-# nos secrets do Streamlit (CERT_DRIVE_URL / CERT_DRIVE_TOKEN), nunca no código:
-# o repositório é público. Sem os dois, o envio fica desligado.
+# para os 6 escritórios (apps_script_certificados_drive.gs), MESMA URL em todos;
+# só muda CERT_DRIVE_ESCRITORIO. O envio não pede token: quem tiver a URL só
+# consegue colocar arquivo na pasta (ver/baixar exige o TOKEN_ADMIN do script).
+# URL vazia = envio desligado.
+CERT_DRIVE_URL = "https://script.google.com/macros/s/AKfycbw6cARz9B3vqKRIyaY9hSYVRLMXqV3on5dQT8kH18UESR1qtdF-OvlIsosksKgyDZ71kw/exec"
 CERT_DRIVE_ESCRITORIO = "VIDAL"
 
 
 def _cert_enviar_drive(nome, conteudo, senha, cnpj, razao, validade_iso):
     """Retorna (True, "") se guardou, (False, erro) se falhou,
-    (None, "") se o envio não está configurado."""
-    def _secret(nome):
-        # No TOML, uma chave colada depois de um "[secao]" vai parar dentro da
-        # seção — procura no topo e, se não achar, dentro de cada seção.
-        try:
-            if nome in st.secrets:
-                return str(st.secrets[nome]).strip()
-            for val in st.secrets.values():
-                if hasattr(val, "get") and val.get(nome):
-                    return str(val.get(nome)).strip()
-        except Exception:   # sem secrets.toml (rodando local)
-            pass
-        return ""
-
-    url, token = _secret("CERT_DRIVE_URL"), _secret("CERT_DRIVE_TOKEN")
-    if not url or not token:
+    (None, "") se o envio está desligado (CERT_DRIVE_URL vazio)."""
+    if not CERT_DRIVE_URL:
         return None, ""
     try:
-        resp = requests.post(url, json={
+        resp = requests.post(CERT_DRIVE_URL, json={
             "acao": "upload",
-            "token": token,
             "escritorio": CERT_DRIVE_ESCRITORIO,
             "nome_arquivo": nome,
             "conteudo_b64": base64.b64encode(conteudo).decode("ascii"),
@@ -833,13 +820,7 @@ def pagina_certificados():
                     if adicionados:
                         msgs.append(("ok", f"✅ {adicionados} certificado(s) importado(s)!"))
                     if drive_desligado:
-                        try:
-                            chaves = ", ".join(sorted(st.secrets.keys())) or "nenhuma"
-                        except Exception:
-                            chaves = "nenhuma (sem Secrets)"
-                        msgs.append(("erro", "⚠️ Cópia no Drive desligada: faltam CERT_DRIVE_URL e/ou "
-                                             f"CERT_DRIVE_TOKEN nos Secrets do app. Chaves que o app "
-                                             f"enxerga hoje: {chaves}."))
+                        msgs.append(("erro", "⚠️ Cópia no Drive desligada (CERT_DRIVE_URL vazio)."))
                     if drive_ok:
                         msgs.append(("ok", f"☁️ {drive_ok} arquivo(s) guardado(s) no Drive."))
                     for err in drive_erros:
