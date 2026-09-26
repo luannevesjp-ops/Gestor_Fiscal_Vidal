@@ -215,11 +215,12 @@ _COLS_MSG   = ["tipo", "mensagem"]
 
 # URL do Apps Script publicado como Web App na planilha Google
 # Apps Script PRÓPRIO do VIDAL (bound à planilha do VIDAL, ver
-# apps_script_certificado_digital.gs nesta pasta) — AINDA NÃO PUBLICADO.
-# Enquanto estiver vazio, os certificados só ficam na sessão/cert_data.json
-# local e NÃO são gravados na planilha. NUNCA colar aqui a URL de outro
-# escritório (os dados iriam pra planilha errada).
-APPS_SCRIPT_URL = ""
+# apps_script_certificado_digital.gs nesta pasta) — publicado em 26/09/2026,
+# bound à planilha do GOOGLE_SHEET_URL (a da aba GERAL). Se ficar vazio, os
+# certificados só ficam na sessão/cert_data.json local e NÃO são gravados na
+# planilha. NUNCA colar aqui a URL de outro escritório (os dados iriam pra
+# planilha errada).
+APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwE_JJcLVtRnZqjlZ8oV-Z__Jjb5dbwxYdUwyJDZI8ALO1DnXsaJQZJwaPTCavr7lZR/exec"
 
 
 def _cert_carregar_dados():
