@@ -67,7 +67,7 @@ function configurar() {
 // ── Web app ──────────────────────────────────────────────────────────────────
 function doGet() {
   // Só pra conferir se a implantação está no ar — não devolve dado nenhum.
-  return json_({ status: "ok", servico: "certificados-drive", versao: 2 });
+  return json_({ status: "ok", servico: "certificados-drive", versao: 3 });
 }
 
 function doPost(e) {
@@ -75,6 +75,7 @@ function doPost(e) {
     const req = JSON.parse(e.postData.contents);
     const acao = req.acao || "upload";
     if (acao === "upload") return json_(upload_(req));
+    if (acao === "upload_lote") return json_(uploadLote_(req));
     if (acao === "listar") return json_(listar_(req));
     if (acao === "baixar") return json_(baixar_(req));
     return json_({ status: "erro", mensagem: "Ação desconhecida: " + acao });
@@ -84,60 +85,84 @@ function doPost(e) {
 }
 
 
-// ── upload: {escritorio, nome_arquivo, conteudo_b64, senha,
-//             cnpj, razao_social, validade_iso} ─────────────────────────────
+// ── upload (1 arquivo): {escritorio, nome_arquivo, conteudo_b64, senha,
+//                          cnpj, razao_social, validade_iso} ────────────────
 function upload_(req) {
+  const r = uploadLote_({ escritorio: req.escritorio, itens: [req] });
+  if (r.status !== "ok") return r;
+  return r.itens[0];
+}
+
+
+// ── upload_lote (vários numa chamada só — bem mais rápido que um POST por
+//    arquivo: a pasta e o senhas.json são lidos/gravados UMA vez):
+//    {escritorio, itens: [{nome_arquivo, conteudo_b64, senha, cnpj,
+//                          razao_social, validade_iso}, ...]}
+//    → {status: "ok", itens: [{status, resultado|mensagem, arquivo}, ...]}
+//    (um item com erro não impede os outros) ────────────────────────────────
+function uploadLote_(req) {
   const esc = String(req.escritorio || "").toUpperCase();
   if (ESCRITORIOS.indexOf(esc) < 0) return { status: "erro", mensagem: "Escritório inválido: " + esc };
-
-  let nome = String(req.nome_arquivo || "").replace(/[\\\/:*?"<>|]/g, "_").trim();
-  if (!/\.(pfx|p12)$/i.test(nome)) return { status: "erro", mensagem: "Arquivo precisa ser .pfx ou .p12." };
-
-  const bytes = Utilities.base64Decode(String(req.conteudo_b64 || ""));
-  if (!bytes.length || bytes.length > TAMANHO_MAX) return { status: "erro", mensagem: "Arquivo vazio ou grande demais." };
+  const itens = req.itens || [];
 
   const lock = LockService.getScriptLock();
-  lock.waitLock(30000);   // dois uploads do mesmo escritório mexem no mesmo senhas.json
+  lock.waitLock(30000);   // dois envios do mesmo escritório mexem no mesmo senhas.json
   try {
     const pasta = subpasta_(esc);
-    const md5 = hex_(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, bytes));
-    let resultado = "novo";
-
-    // Nunca sobrescreve: mesmo nome + mesmo conteúdo → já existia;
-    // mesmo nome + conteúdo diferente → guarda como "nome (2).pfx", "(3)"...
-    const base = nome.replace(/\.(pfx|p12)$/i, "");
-    const ext = nome.slice(base.length);
-    for (let n = 2; ; n++) {
-      const iguais = pasta.getFilesByName(nome);
-      if (!iguais.hasNext()) break;
-      let mesmoConteudo = false;
-      while (iguais.hasNext()) {
-        const b = iguais.next().getBlob().getBytes();
-        if (hex_(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, b)) === md5) mesmoConteudo = true;
-      }
-      if (mesmoConteudo) { resultado = "ja_existia"; break; }
-      nome = base + " (" + n + ")" + ext;
-    }
-
-    let arq = null;
-    if (resultado !== "ja_existia") {
-      arq = pasta.createFile(Utilities.newBlob(bytes, "application/x-pkcs12", nome));
-      arq.setDescription(JSON.stringify({
-        cnpj: String(req.cnpj || ""),
-        razao_social: String(req.razao_social || ""),
-        validade_iso: String(req.validade_iso || ""),
-        enviado_em: new Date().toISOString(),
-      }));
-    }
-
     const senhas = lerSenhas_(pasta);
-    senhas[nome] = String(req.senha || "");
-    gravarSenhas_(pasta, senhas);
-
-    return { status: "ok", resultado: resultado, arquivo: nome, id: arq ? arq.getId() : "" };
+    const saida = itens.map(function (it) {
+      try {
+        return guardarArquivo_(pasta, senhas, it);
+      } catch (err) {
+        return { status: "erro", arquivo: String(it.nome_arquivo || ""), mensagem: String(err && err.message || err) };
+      }
+    });
+    if (saida.some(function (r) { return r.status === "ok"; })) gravarSenhas_(pasta, senhas);
+    return { status: "ok", itens: saida };
   } finally {
     lock.releaseLock();
   }
+}
+
+
+function guardarArquivo_(pasta, senhas, req) {
+  let nome = String(req.nome_arquivo || "").replace(/[\\\/:*?"<>|]/g, "_").trim();
+  if (!/\.(pfx|p12)$/i.test(nome)) return { status: "erro", arquivo: nome, mensagem: "Arquivo precisa ser .pfx ou .p12." };
+
+  const bytes = Utilities.base64Decode(String(req.conteudo_b64 || ""));
+  if (!bytes.length || bytes.length > TAMANHO_MAX) return { status: "erro", arquivo: nome, mensagem: "Arquivo vazio ou grande demais." };
+
+  const md5 = hex_(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, bytes));
+  let resultado = "novo";
+
+  // Nunca sobrescreve: mesmo nome + mesmo conteúdo → já existia;
+  // mesmo nome + conteúdo diferente → guarda como "nome (2).pfx", "(3)"...
+  const base = nome.replace(/\.(pfx|p12)$/i, "");
+  const ext = nome.slice(base.length);
+  for (let n = 2; ; n++) {
+    const iguais = pasta.getFilesByName(nome);
+    if (!iguais.hasNext()) break;
+    let mesmoConteudo = false;
+    while (iguais.hasNext()) {
+      const b = iguais.next().getBlob().getBytes();
+      if (hex_(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, b)) === md5) mesmoConteudo = true;
+    }
+    if (mesmoConteudo) { resultado = "ja_existia"; break; }
+    nome = base + " (" + n + ")" + ext;
+  }
+
+  let arq = null;
+  if (resultado !== "ja_existia") {
+    arq = pasta.createFile(Utilities.newBlob(bytes, "application/x-pkcs12", nome));
+    arq.setDescription(JSON.stringify({
+      cnpj: String(req.cnpj || ""),
+      razao_social: String(req.razao_social || ""),
+      validade_iso: String(req.validade_iso || ""),
+      enviado_em: new Date().toISOString(),
+    }));
+  }
+  senhas[nome] = String(req.senha || "");
+  return { status: "ok", resultado: resultado, arquivo: nome, id: arq ? arq.getId() : "" };
 }
 
 
@@ -210,9 +235,21 @@ function pastaRaiz_() {
 }
 
 function subpasta_(esc) {
+  // ID da subpasta guardado nas Propriedades → não procura pelo nome toda vez
+  const props = PropertiesService.getScriptProperties();
+  const chave = "SUBPASTA_" + esc;
+  const id = props.getProperty(chave);
+  if (id) {
+    try {
+      const f = DriveApp.getFolderById(id);
+      if (!f.isTrashed()) return f;
+    } catch (e) {}   // apagada/movida → procura de novo
+  }
   const raiz = pastaRaiz_();
   const it = raiz.getFoldersByName(esc);
-  return it.hasNext() ? it.next() : raiz.createFolder(esc);
+  const pasta = it.hasNext() ? it.next() : raiz.createFolder(esc);
+  props.setProperty(chave, pasta.getId());
+  return pasta;
 }
 
 function lerSenhas_(pasta) {
