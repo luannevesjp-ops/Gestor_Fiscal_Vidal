@@ -293,6 +293,8 @@ def _cert_carregar_dados():
                 local = json.loads(CERT_DATA_FILE.read_text(encoding="utf-8"))
                 if local.get("certificados"):
                     dados["certificados"] = local["certificados"]
+                    # ainda não estão na planilha → página oferece "Gravar na planilha"
+                    st.session_state["cert_origem_json"] = True
                     if not emails:
                         dados["emails"] = local.get("emails", {})
                     if local.get("mensagens"):
@@ -332,7 +334,7 @@ def _cert_salvar_dados(data):
 
     # ── Apps Script → grava nas abas da planilha Google ───────────────────────
     if not APPS_SCRIPT_URL:
-        return
+        return False
 
     try:
         payload = {
@@ -352,9 +354,21 @@ def _cert_salvar_dados(data):
                            for tipo, msg in data.get("mensagens", {}).items()],
             },
         }
-        requests.post(APPS_SCRIPT_URL, json=payload, timeout=30)
+        r = requests.post(APPS_SCRIPT_URL, json=payload, timeout=60)
+        try:
+            resposta = r.json()
+        except ValueError:
+            resposta = {"status": "error", "message": f"resposta inesperada (HTTP {r.status_code})"}
+        if resposta.get("status") != "ok":
+            raise RuntimeError(resposta.get("message", "erro desconhecido"))
+        st.session_state.pop("cert_origem_json", None)
+        return True
     except Exception as e:
-        st.warning(f"Aviso: não foi possível salvar na planilha — {e}")
+        msg = f"⚠️ Não foi possível gravar na planilha — {e}"
+        # guardado pra sobreviver ao st.rerun() que vem logo depois das gravações
+        st.session_state["cert_aviso_gravacao"] = msg
+        st.warning(msg)
+        return False
 
 
 def _cert_situacao(validade_iso: str):
@@ -554,6 +568,24 @@ def pagina_certificados():
             "importados ficam só no servidor e **podem sumir** quando o sistema for "
             "atualizado ou reiniciado. Fale com o suporte para publicar o Apps Script."
         )
+
+    if st.session_state.get("cert_aviso_gravacao"):
+        st.warning(st.session_state.pop("cert_aviso_gravacao"))
+
+    if APPS_SCRIPT_URL and certs and st.session_state.get("cert_origem_json"):
+        c_av, c_bt = st.columns([3, 1])
+        with c_av:
+            st.warning(
+                f"Os **{len(certs)} certificado(s)** abaixo estão só no servidor e **ainda não "
+                "foram gravados na planilha**. Clique em *Gravar na planilha* para não perdê-los."
+            )
+        with c_bt:
+            if st.button("💾 Gravar na planilha", key="btn_cert_gravar_planilha",
+                         type="primary", use_container_width=True):
+                if _cert_salvar_dados(dados):
+                    st.session_state["cert_import_msgs"] = [
+                        ("ok", f"✅ {len(certs)} certificado(s) gravado(s) na planilha!")]
+                st.rerun()
 
     # Resultado do último Importar (guardado antes do rerun, senão a mensagem some)
     for tipo, msg in st.session_state.pop("cert_import_msgs", []):
