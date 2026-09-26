@@ -371,6 +371,44 @@ def _cert_salvar_dados(data):
         return False
 
 
+# Cópia dos arquivos .pfx na pasta CERTIFICADOS do Drive — Apps Script único
+# para os 6 escritórios (apps_script_certificados_drive.gs). URL e token ficam
+# nos secrets do Streamlit (CERT_DRIVE_URL / CERT_DRIVE_TOKEN), nunca no código:
+# o repositório é público. Sem os dois, o envio fica desligado.
+CERT_DRIVE_ESCRITORIO = "VIDAL"
+
+
+def _cert_enviar_drive(nome, conteudo, senha, cnpj, razao, validade_iso):
+    """Retorna (True, "") se guardou, (False, erro) se falhou,
+    (None, "") se o envio não está configurado."""
+    try:
+        url = str(st.secrets.get("CERT_DRIVE_URL", ""))
+        token = str(st.secrets.get("CERT_DRIVE_TOKEN", ""))
+    except Exception:   # sem secrets.toml (rodando local)
+        url, token = "", ""
+    if not url or not token:
+        return None, ""
+    try:
+        resp = requests.post(url, json={
+            "acao": "upload",
+            "token": token,
+            "escritorio": CERT_DRIVE_ESCRITORIO,
+            "nome_arquivo": nome,
+            "conteudo_b64": base64.b64encode(conteudo).decode("ascii"),
+            "senha": senha,
+            "cnpj": cnpj,
+            "razao_social": razao,
+            "validade_iso": validade_iso,
+        }, timeout=60)
+        resp.raise_for_status()
+        ret = resp.json()
+        if ret.get("status") == "ok":
+            return True, ""
+        return False, ret.get("mensagem", "resposta inesperada do Apps Script")
+    except Exception as e:
+        return False, str(e)
+
+
 def _cert_situacao(validade_iso: str):
     """Retorna (situação, dias) a partir de 'YYYY-MM-DD'."""
     try:
@@ -749,6 +787,7 @@ def pagina_certificados():
                 st.markdown("<hr style='margin:6px 0'>", unsafe_allow_html=True)
                 if st.button("✅ Importar", key="btn_importar_pasta", type="primary"):
                     adicionados, erros = 0, []
+                    drive_ok, drive_erros = 0, []
                     for nome, (f_obj, senha) in senhas_novas.items():
                         if not senha:
                             erros.append(f"{nome}: senha não informada.")
@@ -768,11 +807,24 @@ def pagina_certificados():
                             adicionados += 1
                         except Exception as e:
                             erros.append(f"{nome}: {e}")
+                            continue
+                        # Cópia do arquivo .pfx na pasta CERTIFICADOS do Drive (não
+                        # impede a importação se falhar)
+                        ok_drive, msg_drive = _cert_enviar_drive(
+                            nome, conteudo, senha, cnpj, razao, val_iso)
+                        if ok_drive:
+                            drive_ok += 1
+                        elif ok_drive is False:
+                            drive_erros.append(f"{nome}: {msg_drive}")
                     dados["certificados"] = certs
                     _cert_salvar_dados(dados)
                     msgs = []
                     if adicionados:
                         msgs.append(("ok", f"✅ {adicionados} certificado(s) importado(s)!"))
+                    if drive_ok:
+                        msgs.append(("ok", f"☁️ {drive_ok} arquivo(s) guardado(s) no Drive."))
+                    for err in drive_erros:
+                        msgs.append(("erro", f"⚠️ Importado, mas não foi para o Drive — {err}"))
                     for err in erros:
                         msgs.append(("erro", f"❌ Não importado — {err} "
                                              "Confira a senha e selecione o arquivo de novo."))
