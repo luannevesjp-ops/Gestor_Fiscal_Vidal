@@ -1484,12 +1484,34 @@ def pagina_empresas():
     
     colunas = ["Código", "Razão Social", "CNPJ", "Regime", "Município", "Estado", "Matriz / Filial", "Situação"]
     df_empresas = df_empresas[[c for c in colunas if c in df_empresas.columns]]
-    df_empresas = _sanitiza_df(df_empresas)   # ← ADICIONE AQUI
+    df_empresas = _sanitiza_df(df_empresas)
     total_empresas = df_empresas.shape[0]
-    
+
+    # ── paleta de cores por regime ────────────────────────────────────────────
+    _CORES_REGIME = [
+        "#1d3f77", "#27ae60", "#e67e22", "#8e44ad",
+        "#c0392b", "#2471a3", "#148f77", "#d35400",
+        "#7f8c8d", "#b7950b",
+    ]
+
     st.subheader("Empresas - Apenas ATIVAS")
     st.markdown(f"<p style='text-align:right; font-size:20px;'><b>Total:</b> {total_empresas} | <b>Competência:</b> {competencia}</p>", unsafe_allow_html=True)
-    
+
+    if "Regime" in df_empresas.columns:
+        regime_serie = df_empresas["Regime"].replace({"nan": "", "None": ""}).fillna("")
+        regime_serie = regime_serie.apply(lambda v: "Em Branco" if str(v).strip() == "" else str(v).strip())
+        contagem_regime = regime_serie.value_counts().to_dict()
+
+        badges = ""
+        for i, (regime, qtd) in enumerate(sorted(contagem_regime.items())):
+            cor = _CORES_REGIME[i % len(_CORES_REGIME)]
+            badges += (
+                f"<span style='display:inline-block; margin:3px 6px 3px 0; padding:5px 14px; "
+                f"background:{cor}; color:#fff; border-radius:20px; font-size:13px; font-weight:600;'>"
+                f"{regime}: {qtd}</span>"
+            )
+        st.markdown(f"<div style='margin-bottom:10px;'>{badges}</div>", unsafe_allow_html=True)
+
     with st.container():
         df_empresas = _sanitiza_df(df_empresas)
         exibe_aggrid(df_empresas, height=400, grid_key="grid_empresas")
