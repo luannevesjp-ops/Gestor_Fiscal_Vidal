@@ -372,7 +372,8 @@ def _cert_salvar_dados(data):
 
 
 # Cópia dos arquivos .pfx na pasta CERTIFICADOS do Drive — Apps Script único
-# para os 6 escritórios (apps_script_certificados_drive.gs), MESMA URL em todos;
+# para os 6 escritórios (PROGRAMA/SCRIPTS_COMPARTILHADOS/apps_script_certificados_drive.gs),
+# MESMA URL em todos;
 # só muda CERT_DRIVE_ESCRITORIO. O envio não pede token: quem tiver a URL só
 # consegue colocar arquivo na pasta (ver/baixar exige o TOKEN_ADMIN do script).
 # URL vazia = envio desligado.
@@ -1901,7 +1902,7 @@ def pagina_situacao_fiscal_dashboard():
 # PDF mais recente de SITUAÇÃO FISCAL de cada empresa, casando pelo Código
 # embutido no nome do arquivo ("_<código>_SITUAÇÃO FISCAL MM-AAAA.pdf").
 # COMPARTILHADO entre todos os escritórios (ver apps_script_pdf_situacao_fiscal.gs
-# guardado na pasta ASBEM) - a URL só funciona de fato depois que o script
+# guardado em PROGRAMA/SCRIPTS_COMPARTILHADOS) - a URL só funciona de fato depois que o script
 # compartilhado for republicado com a pasta do Drive da VIDAL cadastrada em
 # PASTAS_POR_ESCRITORIO; até lá a lupa simplesmente não aparece na tabela, a
 # página não quebra.
@@ -3515,32 +3516,97 @@ def pagina_cnd_municipal():
 # DASHBOARD PARALEGAL
 # ============================================================================
 
-def _formata_estado(s):
-    """GO → G.O.  — impede Chrome de traduzir siglas"""
-    s = str(s).strip()
-    if len(s) == 2 and s.isalpha():
-        return f"{s[0]}.{s[1]}."
-    return s
+_UF_NOMES = {
+    "AC": "Acre", "AL": "Alagoas", "AP": "Amapá", "AM": "Amazonas", "BA": "Bahia",
+    "CE": "Ceará", "DF": "Distrito Federal", "ES": "Espírito Santo", "GO": "Goiás",
+    "MA": "Maranhão", "MT": "Mato Grosso", "MS": "Mato Grosso do Sul",
+    "MG": "Minas Gerais", "PA": "Pará", "PB": "Paraíba", "PR": "Paraná",
+    "PE": "Pernambuco", "PI": "Piauí", "RJ": "Rio de Janeiro",
+    "RN": "Rio Grande do Norte", "RS": "Rio Grande do Sul", "RO": "Rondônia",
+    "RR": "Roraima", "SC": "Santa Catarina", "SP": "São Paulo", "SE": "Sergipe",
+    "TO": "Tocantins",
+}
+
+_DASH_AZUL       = "#1d3f77"
+_DASH_AZUL_CLARO = "#4a90d9"
 
 
-def _estado_original(s):
-    """G.O. → GO"""
-    return s.replace(".", "")
+def _nome_uf(uf):
+    """GO → "Goiás (GO)". O nome por extenso também evita o Chrome traduzir a sigla."""
+    uf = str(uf).strip().upper()
+    if uf in _UF_NOMES:
+        return f"{_UF_NOMES[uf]} ({uf})"
+    return "Não informado" if uf in ("", "NAN", "NONE", "N/I") else uf
 
 
-@st.dialog("Detalhes das Empresas")
+def _texto_local(serie):
+    """Estado/Município limpos pra agrupar: vazio/nan viram "Não informado"."""
+    s = serie.fillna("").astype(str).str.strip()
+    return s.where(~s.str.upper().isin(["", "NAN", "NONE"]), "Não informado")
+
+
+def _fmt_pct(v):
+    return f"{v:.1f}%".replace(".", ",")
+
+
+@st.dialog("Detalhes das Empresas", width="large")
 def _modal_dashboard(titulo, df_show, colunas):
     st.markdown(f"**{titulo}** — {df_show.shape[0]} empresa(s)")
     cols_ok = [c for c in colunas if c in df_show.columns]
     df_exib = df_show[cols_ok].reset_index(drop=True).copy()
     if "CNPJ" in df_exib.columns:
         df_exib["CNPJ"] = df_exib["CNPJ"].apply(_formata_cnpj_mascara)
+    df_exib = _sanitiza_df(df_exib)
     st.dataframe(df_exib, use_container_width=True, hide_index=True)
+
+
+def _dash_card(icone, titulo, valor, detalhe=""):
+    return (
+        "<div class='dp-card'>"
+        f"<div class='dp-card-top'><span class='dp-card-ico'>{icone}</span>{titulo}</div>"
+        f"<div class='dp-card-val'>{valor}</div>"
+        f"<div class='dp-card-det'>{detalhe}</div>"
+        "</div>"
+    )
+
+
+def _dash_barras(df_count, rotulo_col, altura_linha=34, key=None):
+    """Barras horizontais (maior em cima) com "qtd · %" na ponta. Devolve o evento
+    de seleção do st.plotly_chart (clique na barra)."""
+    import plotly.graph_objects as go
+
+    df_plot = df_count.iloc[::-1]   # plotly desenha de baixo pra cima
+    maximo = df_count["Quantidade"].max()
+    cores = [_DASH_AZUL if i == 0 else _DASH_AZUL_CLARO for i in range(len(df_count))][::-1]
+
+    fig = go.Figure(go.Bar(
+        x=df_plot["Quantidade"], y=df_plot[rotulo_col], orientation="h",
+        marker=dict(color=cores, cornerradius=6),
+        text=[f"<b>{q}</b>  ·  {_fmt_pct(p)}" for q, p in zip(df_plot["Quantidade"], df_plot["Pct"])],
+        # barra grande: número dentro (branco); barra pequena: fora (cinza)
+        textposition="auto", cliponaxis=False, insidetextanchor="end",
+        insidetextfont=dict(size=12, color="#ffffff"),
+        outsidetextfont=dict(size=12, color="#34495e"),
+        customdata=df_plot[["Chave"]].values,
+        hovertemplate="<b>%{y}</b><br>%{x} empresa(s)<extra>Clique para ver a lista</extra>",
+    ))
+    fig.update_layout(
+        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        showlegend=False, bargap=0.35,
+        xaxis=dict(visible=False, range=[0, maximo * 1.05]),
+        yaxis=dict(title="", tickfont=dict(size=13, color="#2c3e50"), showgrid=False,
+                   ticksuffix="  "),
+        margin=dict(t=6, r=45, b=6, l=6),
+        height=max(160, len(df_count) * altura_linha + 20),
+        clickmode="event+select",
+        dragmode=False,
+    )
+    return st.plotly_chart(fig, use_container_width=True, on_select="rerun", key=key,
+                           config={"displayModeBar": False})
 
 
 @st.fragment
 def pagina_dashboard_paralegal():
-    import plotly.express as px
     st.empty()
 
     df = le_planilha_google(GOOGLE_SHEET_URL, SHEET_EMPRESAS)
@@ -3553,187 +3619,178 @@ def pagina_dashboard_paralegal():
 
     df_ativas = df[df["Situação"].astype(str).str.upper() == "ATIVA"].copy()
     total_ativas = df_ativas.shape[0]
+    tem_estado = "Estado" in df_ativas.columns
+    tem_mun = "Município" in df_ativas.columns
 
-    st.markdown("<h2 style='color:#1d3f77;'>Dashboard — Departamento Paralegal</h2>",
-                unsafe_allow_html=True)
-    st.markdown(f"<p style='font-size:18px;'><b>Total de empresas ativas:</b> {total_ativas}</p>",
-                unsafe_allow_html=True)
-    st.divider()
+    df_ativas["_UF"] = _texto_local(df_ativas["Estado"]).str.upper() if tem_estado else "Não informado"
+    df_ativas["_UF"] = df_ativas["_UF"].replace({"NÃO INFORMADO": "Não informado"})
+    df_ativas["_MUN"] = _texto_local(df_ativas["Município"]) if tem_mun else "Não informado"
 
-    # ── controle de modal: guarda último clique de cada gráfico
-    for k in ["ult_estado", "ult_municipio", "ult_cnd"]:
+    st.markdown("""
+<style>
+.dp-titulo { color:#1d3f77 !important; margin:0 0 2px 0; font-weight:700; }
+.dp-sub    { color:#7f8c8d; font-size:15px; margin:0 0 18px 0; }
+.dp-cards  { display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));
+             gap:14px; margin-bottom:22px; }
+.dp-card   { background:#fff; border:1px solid #e3e9f2; border-left:5px solid #1d3f77;
+             border-radius:12px; padding:14px 18px;
+             box-shadow:0 2px 8px rgba(29,63,119,0.07); }
+.dp-card-top { color:#7f8c8d; font-size:13px; font-weight:600; text-transform:uppercase;
+               letter-spacing:.4px; }
+.dp-card-ico { margin-right:6px; }
+.dp-card-val { color:#1d3f77; font-size:30px; font-weight:800; line-height:1.25; margin-top:4px;
+               white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.dp-card-det { color:#95a5a6; font-size:13px; min-height:18px; }
+.dp-sec      { color:#1d3f77; font-size:19px; font-weight:700; margin:0; }
+.dp-sec-cap  { color:#95a5a6; font-size:13px; margin:0 0 6px 0; }
+</style>
+""", unsafe_allow_html=True)
+
+    st.markdown("<h2 class='dp-titulo'>Dashboard — Departamento Paralegal</h2>"
+                "<p class='dp-sub'>Distribuição das empresas ativas por Estado e Município</p>",
+                unsafe_allow_html=True)
+
+    if total_ativas == 0:
+        st.info("Nenhuma empresa ativa encontrada.")
+        return
+
+    # ── contagens ────────────────────────────────────────────────────────────
+    df_uf = df_ativas["_UF"].value_counts().reset_index()
+    df_uf.columns = ["Chave", "Quantidade"]
+    df_uf["Pct"] = df_uf["Quantidade"] / total_ativas * 100
+    df_uf["Estado"] = df_uf["Chave"].apply(_nome_uf)
+
+    df_mun = df_ativas["_MUN"].value_counts().reset_index()
+    df_mun.columns = ["Chave", "Quantidade"]
+    df_mun["Pct"] = df_mun["Quantidade"] / total_ativas * 100
+    df_mun["Município"] = df_mun["Chave"]
+
+    qtd_uf  = int((df_uf["Chave"] != "Não informado").sum())
+    qtd_mun = int((df_mun["Chave"] != "Não informado").sum())
+    top_mun = df_mun.iloc[0]
+    top_uf  = df_uf.iloc[0]
+
+    # ── cards ────────────────────────────────────────────────────────────────
+    st.markdown(
+        "<div class='dp-cards'>"
+        + _dash_card("🏢", "Empresas ativas", total_ativas, "base da aba GERAL")
+        + _dash_card("🗺️", "Estados", qtd_uf,
+                     f"{_nome_uf(top_uf['Chave'])} concentra {_fmt_pct(top_uf['Pct'])}")
+        + _dash_card("📍", "Municípios", qtd_mun, "com ao menos 1 empresa ativa")
+        + _dash_card("⭐", "Principal município", top_mun["Chave"].title(),
+                     f"{int(top_mun['Quantidade'])} empresas · {_fmt_pct(top_mun['Pct'])} do total")
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+
+    for k in ["ult_estado", "ult_municipio"]:
         if k not in st.session_state:
             st.session_state[k] = None
-
     modal_abrir = None   # apenas UM modal por execução
+    colunas_modal = ["Código", "Razão Social", "CNPJ", "Município", "Estado", "Regime"]
 
-    # ── EMPRESAS POR ESTADO ──────────────────────────────────────────────────
-    st.markdown("### Empresas por Estado")
-    st.caption("Clique em uma barra para ver as empresas")
+    col_uf, col_mun = st.columns([1, 1.2], gap="large")
 
-    if "Estado" in df_ativas.columns:
-        df_est = df_ativas["Estado"].fillna("N/I").astype(str).str.strip()
-        df_est_count = df_est.value_counts().reset_index()
-        df_est_count.columns = ["Estado_orig", "Quantidade"]
-        df_est_count["Estado"] = df_est_count["Estado_orig"].apply(_formata_estado)
+    # ── POR ESTADO ───────────────────────────────────────────────────────────
+    with col_uf:
+        with st.container(border=True):
+            st.markdown("<p class='dp-sec'>🗺️ Empresas por Estado</p>"
+                        "<p class='dp-sec-cap'>Clique em uma barra para ver as empresas</p>",
+                        unsafe_allow_html=True)
+            if tem_estado:
+                ev_uf = _dash_barras(df_uf, "Estado", altura_linha=40, key="chart_estado")
+                if ev_uf and ev_uf.selection and ev_uf.selection.points:
+                    sel = (ev_uf.selection.points[0].get("customdata") or [None])[0]
+                    if sel and sel != st.session_state["ult_estado"]:
+                        st.session_state["ult_estado"] = sel
+                        modal_abrir = (f"Estado: {_nome_uf(sel)}",
+                                       df_ativas[df_ativas["_UF"] == sel], colunas_modal)
+            else:
+                st.warning("Coluna 'Estado' não encontrada.")
 
-        df_est_count["Qtd_display"] = df_est_count["Quantidade"].apply(
-            lambda x: max(x, df_est_count["Quantidade"].max() * 0.03)
-        )
+    # ── POR MUNICÍPIO ────────────────────────────────────────────────────────
+    with col_mun:
+        with st.container(border=True):
+            st.markdown("<p class='dp-sec'>📍 Empresas por Município</p>"
+                        "<p class='dp-sec-cap'>Clique em uma barra para ver as empresas</p>",
+                        unsafe_allow_html=True)
+            if tem_mun:
+                LIMITE = 10
+                ver_todos = False
+                if len(df_mun) > LIMITE:
+                    ver_todos = st.toggle(f"Mostrar todos os {len(df_mun)} municípios",
+                                          key="dash_mun_todos")
+                df_mun_exib = df_mun if ver_todos else df_mun.head(LIMITE)
+                ev_mun = _dash_barras(df_mun_exib, "Município", altura_linha=34,
+                                      key="chart_municipio_todos" if ver_todos else "chart_municipio")
+                if not ver_todos and len(df_mun) > LIMITE:
+                    resto = df_mun.iloc[LIMITE:]
+                    st.caption(f"Outros {len(resto)} municípios somam {int(resto['Quantidade'].sum())} "
+                               f"empresa(s) ({_fmt_pct(resto['Pct'].sum())}) — ative \"Mostrar todos\" para ver.")
+                if modal_abrir is None and ev_mun and ev_mun.selection and ev_mun.selection.points:
+                    sel = (ev_mun.selection.points[0].get("customdata") or [None])[0]
+                    if sel and sel != st.session_state["ult_municipio"]:
+                        st.session_state["ult_municipio"] = sel
+                        modal_abrir = (f"Município: {sel}",
+                                       df_ativas[df_ativas["_MUN"] == sel], colunas_modal)
+            else:
+                st.warning("Coluna 'Município' não encontrada.")
 
-        fig_est = px.bar(
-            df_est_count, x="Estado", y="Qtd_display",
-            color="Qtd_display",
-            color_continuous_scale=[[0, "#4a90d9"], [1, "#1d3f77"]],
-            text="Quantidade",
-            custom_data=["Estado_orig", "Quantidade"],
-        )
-        fig_est.update_traces(
-            textposition="outside",
-            hovertemplate="<b>%{customdata[0]}</b><br>Qtd: %{customdata[1]}<extra></extra>",
-        )
-        fig_est.update_layout(
-            plot_bgcolor="white", paper_bgcolor="white",
-            coloraxis_showscale=False,
-            xaxis=dict(title="", tickfont=dict(size=13), showgrid=False),
-            yaxis=dict(title="", showgrid=False, zeroline=False),
-            margin=dict(t=30, b=20, l=10, r=10),
-            height=350,
-            clickmode="event+select",
-            bargap=0.1,
-            bargroupgap=0.0,
-        )
+    # ── CONSULTA POR LOCALIDADE ──────────────────────────────────────────────
+    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+    with st.container(border=True):
+        st.markdown("<p class='dp-sec'>🔎 Consultar empresas por localidade</p>"
+                    "<p class='dp-sec-cap'>Filtre por Estado e Município para ver e baixar a lista</p>",
+                    unsafe_allow_html=True)
 
-        ev_est = st.plotly_chart(fig_est, use_container_width=True,
-                                  on_select="rerun", key="chart_estado")
+        f1, f2 = st.columns(2)
+        ufs = df_uf["Chave"].tolist()
+        uf_sel = f1.selectbox("Estado", ["Todos"] + ufs,
+                              format_func=lambda v: v if v == "Todos" else _nome_uf(v),
+                              key="dash_filtro_uf")
+        base = df_ativas if uf_sel == "Todos" else df_ativas[df_ativas["_UF"] == uf_sel]
+        muns = base["_MUN"].value_counts().index.tolist()
+        mun_sel = f2.selectbox("Município", ["Todos"] + sorted(muns), key="dash_filtro_mun")
+        if mun_sel != "Todos":
+            base = base[base["_MUN"] == mun_sel]
 
-        if ev_est and ev_est.selection and ev_est.selection.points:
-            pt   = ev_est.selection.points[0]
-            sel_raw = (pt.get("customdata") or [None])[0]
-            if sel_raw is None:
-                sel_raw = _estado_original(pt.get("x", ""))
-            if sel_raw and sel_raw != st.session_state["ult_estado"]:
-                st.session_state["ult_estado"] = sel_raw
-                df_fil = df_ativas[
-                    df_ativas["Estado"].fillna("N/I").astype(str).str.strip() == sel_raw
-                ]
-                modal_abrir = (f"Estado: {sel_raw}", df_fil,
-                               ["Razão Social", "CNPJ"])
-    else:
-        st.warning("Coluna 'Estado' não encontrada.")
+        # resumo Estado × Município da seleção
+        resumo = (base.groupby(["_UF", "_MUN"]).size().reset_index(name="Empresas")
+                  .sort_values(["Empresas", "_MUN"], ascending=[False, True]))
+        resumo["Estado"] = resumo["_UF"].apply(_nome_uf)
+        resumo["Município"] = resumo["_MUN"]
+        resumo["% do total"] = (resumo["Empresas"] / total_ativas * 100).apply(_fmt_pct)
 
-    st.divider()
+        cols_lista = [c for c in colunas_modal if c in base.columns]
+        lista = base[cols_lista].copy()
+        if "CNPJ" in lista.columns:
+            lista["CNPJ"] = lista["CNPJ"].apply(_formata_cnpj_mascara)
+        if "Razão Social" in lista.columns:
+            lista = lista.sort_values("Razão Social", key=lambda c: c.astype(str).str.upper())
+        lista = _sanitiza_df(lista.reset_index(drop=True))
 
-    # ── EMPRESAS POR MUNICÍPIO ───────────────────────────────────────────────
-    st.markdown("### Empresas por Município")
-    st.caption("Clique em uma barra para ver as empresas")
+        st.markdown(f"**{len(lista)} empresa(s)** em **{base['_MUN'].nunique()} município(s)**")
+        aba_lista, aba_resumo = st.tabs(["📋 Empresas", "📊 Resumo por município"])
+        with aba_lista:
+            st.dataframe(lista, use_container_width=True, hide_index=True,
+                         height=min(420, 38 + 35 * max(len(lista), 1)))
+        with aba_resumo:
+            st.dataframe(resumo[["Estado", "Município", "Empresas", "% do total"]],
+                         use_container_width=True, hide_index=True,
+                         height=min(420, 38 + 35 * max(len(resumo), 1)),
+                         column_config={"Empresas": st.column_config.ProgressColumn(
+                             "Empresas", format="%d", min_value=0,
+                             max_value=int(resumo["Empresas"].max()) if len(resumo) else 1)})
 
-    if "Município" in df_ativas.columns:
-        df_mun_count = (df_ativas["Município"].fillna("N/I").astype(str).str.strip()
-                        .value_counts().reset_index())
-        df_mun_count.columns = ["Município", "Quantidade"]
-        df_mun_count = df_mun_count.sort_values("Quantidade", ascending=True)
-
-        altura_mun = max(400, len(df_mun_count) * 28)
-
-        fig_mun = px.bar(
-            df_mun_count, x="Quantidade", y="Município",
-            orientation="h",
-            color="Quantidade",
-            color_continuous_scale=[[0, "#4a90d9"], [1, "#1d3f77"]],
-            text="Quantidade",
-        )
-        fig_mun.update_traces(
-            textposition="outside",
-            hovertemplate="<b>%{y}</b><br>Qtd: %{x}<extra></extra>",
-        )
-        fig_mun.update_layout(
-            plot_bgcolor="white", paper_bgcolor="white",
-            coloraxis_showscale=False,
-            xaxis=dict(title="", showgrid=False, zeroline=False),
-            yaxis=dict(title="", tickfont=dict(size=12), showgrid=False),
-            margin=dict(t=20, r=60, b=20, l=10),
-            height=altura_mun,
-            clickmode="event+select",
-        )
-
-        ev_mun = st.plotly_chart(fig_mun, use_container_width=True,
-                                  on_select="rerun", key="chart_municipio")
-
-        if modal_abrir is None and ev_mun and ev_mun.selection and ev_mun.selection.points:
-            sel_mun = ev_mun.selection.points[0].get("y")
-            if sel_mun and sel_mun != st.session_state["ult_municipio"]:
-                st.session_state["ult_municipio"] = sel_mun
-                df_fil = df_ativas[
-                    df_ativas["Município"].fillna("N/I").astype(str).str.strip() == sel_mun
-                ]
-                modal_abrir = (f"Município: {sel_mun}", df_fil,
-                               ["Razão Social", "CNPJ"])
-    else:
-        st.warning("Coluna 'Município' não encontrada.")
-
-    st.divider()
-
-    # ── CND MUNICIPAL — SITUAÇÃO ─────────────────────────────────────────────
-    st.markdown("### CND Municipal — Situação")
-    st.caption("Clique em uma fatia para ver as empresas")
-
-    if "SITUAÇÃO CND MUNICIPAL" in df_ativas.columns:
-        df_cnd = df_ativas.copy()
-        df_cnd["SIT"] = (df_cnd["SITUAÇÃO CND MUNICIPAL"]
-                         .fillna("").astype(str).str.strip())
-        df_cnd["CND_LABEL"] = df_cnd["SIT"].apply(
-            lambda x: "Outros Municípios" if x == "" or x.upper() == "NAN" else x
-        )
-
-        df_cnd_count = df_cnd["CND_LABEL"].value_counts().reset_index()
-        df_cnd_count.columns = ["Situação", "Quantidade"]
-
-        color_map = {
-            "NEGATIVA":                     "#27ae60",
-            "POSITIVA":                     "#e74c3c",
-            "POSITIVA COM EFEITO NEGATIVA": "#f39c12",
-            "Outros Municípios":            "#bdc3c7",
-        }
-
-        # Ordena para barras menores no topo
-        df_cnd_count = df_cnd_count.sort_values("Quantidade", ascending=True)
-
-        fig_cnd = px.bar(
-            df_cnd_count, x="Quantidade", y="Situação",
-            orientation="h",
-            text="Quantidade",
-            color="Situação",
-            color_discrete_map=color_map,
-        )
-        fig_cnd.update_traces(
-            textposition="outside",
-            hovertemplate="<b>%{y}</b><br>Qtd: %{x}<extra></extra>",
-        )
-        fig_cnd.update_layout(
-            plot_bgcolor="white", paper_bgcolor="white",
-            showlegend=False,
-            xaxis=dict(title="", showgrid=False, zeroline=False),
-            yaxis=dict(title="", tickfont=dict(size=13), showgrid=False),
-            margin=dict(t=20, r=80, b=20, l=10),
-            height=max(200, len(df_cnd_count) * 60),
-            clickmode="event+select",
-        )
-
-        ev_cnd = st.plotly_chart(fig_cnd, use_container_width=True,
-                                  on_select="rerun", key="chart_cnd")
-
-        if modal_abrir is None and ev_cnd and ev_cnd.selection and ev_cnd.selection.points:
-            pt_cnd  = ev_cnd.selection.points[0]
-            sel_cnd = pt_cnd.get("y")
-            if sel_cnd and sel_cnd != st.session_state["ult_cnd"]:
-                st.session_state["ult_cnd"] = sel_cnd
-                df_fil = df_cnd[df_cnd["CND_LABEL"] == sel_cnd]
-                modal_abrir = (f"Situação CND: {sel_cnd}", df_fil,
-                               ["Razão Social", "CNPJ", "Município",
-                                "SITUAÇÃO CND MUNICIPAL"])
-    else:
-        st.info("Coluna 'SITUAÇÃO CND MUNICIPAL' não encontrada.")
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as wr:
+            lista.to_excel(wr, index=False, sheet_name="Empresas")
+            resumo[["Estado", "Município", "Empresas", "% do total"]].to_excel(
+                wr, index=False, sheet_name="Resumo")
+        st.download_button("📥 Baixar Excel", data=output.getvalue(),
+                           file_name="empresas_por_localidade.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           key="dash_baixar_excel")
 
     # ── abre o modal (apenas um por execução) ────────────────────────────────
     if modal_abrir:
@@ -5276,9 +5333,12 @@ def _normaliza_data_br(val):
     if s in ("", "nan", "None", "NaT", "NaN"):
         return ""
     try:
-        dt = pd.to_datetime(s, dayfirst=True, errors="coerce")
+        # Data de verdade na planilha chega como "AAAA-MM-DD 00:00:00": com
+        # dayfirst=True o pandas trocava dia e mês (2027-09-03 virava 09/03/2027).
+        iso = re.match(r"^\d{4}-\d{2}-\d{2}", s) is not None
+        dt = pd.to_datetime(s, dayfirst=not iso, errors="coerce")
         if pd.isna(dt):
-            dt = pd.to_datetime(s, dayfirst=False, errors="coerce")
+            dt = pd.to_datetime(s, dayfirst=iso, errors="coerce")
         return dt.strftime("%d/%m/%Y") if not pd.isna(dt) else ""
     except Exception:
         return ""
