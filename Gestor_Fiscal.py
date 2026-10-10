@@ -102,6 +102,14 @@ grid_container = st.empty()
 # FUNÇÕES AUXILIARES
 # ============================================================================
 
+def formata_mes_ano(valor):
+    # Converte a competência da planilha para MM/AAAA. Se o valor não for uma
+    # data (célula vazia, texto do cabeçalho colado na linha etc.) devolve ""
+    # em vez de quebrar a página com NaT.strftime().
+    data = pd.to_datetime(valor, errors="coerce")
+    return "" if pd.isna(data) else data.strftime("%m/%Y")
+
+
 @st.cache_data(ttl=600)
 def le_planilha_google(url: str, aba: str):
     try:
@@ -1795,7 +1803,7 @@ def _carrega_situacao_fiscal():
     }, inplace=True)
 
     mes_validos = df_leitura["Mês Leitura"].dropna()
-    mes_leitura = pd.to_datetime(mes_validos.iloc[0], errors="coerce").strftime("%m/%Y") \
+    mes_leitura = formata_mes_ano(mes_validos.iloc[0]) \
         if not mes_validos.empty else ""
 
     # ── PROCV: junta a leitura (colunas F em diante) às empresas (A-D) pelo Código ──
